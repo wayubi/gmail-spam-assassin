@@ -4,763 +4,1388 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
 <title>Gmail Spam Assassin</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2310131a'/><circle cx='16' cy='16' r='10.5' fill='none' stroke='%23e2695f' stroke-width='2.6'/><path d='M16 2v5.5M16 24.5V30M2 16h5.5M24.5 16H30' stroke='%23e2695f' stroke-width='2.8' stroke-linecap='round'/><rect x='9.5' y='11.5' width='13' height='9.5' rx='1.4' fill='%23dfe5ef'/><path d='M10.5 12.8l5.5 4 5.5-4' fill='none' stroke='%2310131a' stroke-width='1.7' stroke-linejoin='round' stroke-linecap='round'/></svg>">
 <style>
+/* ------------------------------------------------------------------
+   Tokens. One ink per verdict, postal blue for selection, everything
+   else stays neutral so the verdicts are the only colour on the page.
+   ------------------------------------------------------------------ */
+:root {
+  --paper: #f2f4f7;
+  --surface: #ffffff;
+  --sunk: #e8ecf1;
+  --ink: #16202c;
+  --muted: #5a6677;
+  --faint: #8a95a5;
+  --rule: #dbe1e8;
+  --blue: #2356d0;
+  --blue-tint: #e5edfd;
+  --del: #c0362c;
+  --del-tint: #fbe9e7;
+  --hold: #8f5c0c;
+  --hold-tint: #fbf0dc;
+  --keep: #23784b;
+  --keep-tint: #e0f2e7;
+  --on-ink: #ffffff;
+  --shadow: 0 1px 2px rgb(22 32 44 / .06), 0 8px 24px rgb(22 32 44 / .12);
+  --head: 56px;
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "SF Pro Text", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
   :root {
-    --bg: #10131a;
-    --panel: #171b24;
-    --panel-2: #1e2430;
-    --line: #2a3242;
-    --text: #dfe5ef;
-    --dim: #8d97a8;
-    --accent: #5aa9e6;
-    --good: #4fbf7b;
-    --bad: #e2695f;
-    --warn: #e0a94a;
+    --paper: #111419;
+    --surface: #181c23;
+    --sunk: #1f242d;
+    --ink: #e7ebf1;
+    --muted: #9aa5b5;
+    --faint: #6f7a8a;
+    --rule: #29303b;
+    --blue: #7ea3ff;
+    --blue-tint: #1c2945;
+    --del: #f1786d;
+    --del-tint: #3a201f;
+    --hold: #e4b05c;
+    --hold-tint: #372c17;
+    --keep: #62cc8f;
+    --keep-tint: #15302a;
+    --on-ink: #111419;
+    --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 10px 28px rgb(0 0 0 / .45);
   }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 14px/1.45 var(--font); font-feature-settings: "tnum" 1;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+[hidden] { display: none !important; }
+kbd {
+  font: 600 11px/1 var(--font); min-width: 18px; padding: 3px 5px; border-radius: 4px;
+  display: inline-block; text-align: center;
+  background: rgb(255 255 255 / .22); color: inherit;
+}
+
+/* ---------- header ---------- */
+.app-head {
+  position: sticky; top: 0; z-index: 20; height: var(--head);
+  display: flex; align-items: center; gap: 16px; padding: 0 20px;
+  background: var(--surface); border-bottom: 1px solid var(--rule);
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 15px; white-space: nowrap; }
+.brand svg { width: 26px; height: 26px; flex: none; }
+.head-gap { flex: 1; }
+
+.mode {
+  font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.mode.live { background: var(--del-tint); color: var(--del); }
+.mode.dry { background: var(--hold-tint); color: var(--hold); }
+
+.status { position: relative; }
+.status > summary {
+  list-style: none; display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 6px 10px; border-radius: 8px; color: var(--muted); white-space: nowrap;
+}
+.status > summary::-webkit-details-marker { display: none; }
+.status > summary:hover, .status[open] > summary { background: var(--sunk); color: var(--ink); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--keep); flex: none; }
+.dot.bad { background: var(--del); }
+.dot.busy { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+.status-panel {
+  position: absolute; right: 0; top: calc(100% + 6px); width: 300px;
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 14px 16px;
+}
+.status-panel h3 { margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.status-panel dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; margin: 0; }
+.status-panel dt { color: var(--muted); }
+.status-panel dd { margin: 0; text-align: right; font-weight: 600; }
+.status-panel .err { margin: 10px 0 0; color: var(--del); font-size: 12.5px; overflow-wrap: anywhere; }
+.status-panel .sub { margin: 10px 0 0; color: var(--muted); font-size: 12.5px; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px;
+  border-radius: 8px; border: 1px solid var(--rule); background: var(--surface);
+  font-weight: 600; white-space: nowrap;
+}
+.btn:hover:not(:disabled) { background: var(--sunk); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover:not(:disabled) { background: var(--ink); opacity: .88; }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.quiet:hover:not(:disabled) { color: var(--ink); }
+.btn .ico { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- layout ---------- */
+.shell { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: calc(100vh - var(--head)); }
+.side {
+  position: sticky; top: var(--head); align-self: start; height: calc(100vh - var(--head));
+  padding: 16px 12px; border-right: 1px solid var(--rule); overflow-y: auto;
+}
+.side h2 { margin: 18px 10px 6px; font-size: 12px; font-weight: 600; color: var(--faint); }
+.side h2:first-child { margin-top: 0; }
+.nav-item {
+  width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  text-align: left; font-weight: 550;
+}
+.nav-item:hover { background: var(--sunk); color: var(--ink); }
+.nav-item[aria-current="page"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rule); }
+.nav-item .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; background: var(--faint); }
+.nav-item .count { margin-left: auto; font-size: 12px; color: var(--faint); font-weight: 500; }
+.swatch.del { background: var(--del); }
+.swatch.hold { background: var(--hold); }
+.swatch.keep { background: var(--keep); }
+.nav-item .ico { width: 16px; height: 16px; margin: 0 -3px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.nav-item .swatch { margin-left: 0; }
+.side .help { margin: 26px 10px 0; font-size: 12px; color: var(--faint); }
+.side .help p { margin: 0 0 10px; line-height: 1.5; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; margin: 0 0 14px; align-items: center; }
+.keys dt { display: flex; gap: 3px; }
+.keys dd { margin: 0; }
+.side .help kbd { background: var(--surface); color: var(--muted); box-shadow: inset 0 0 0 1px var(--rule); }
+.link { border: 0; padding: 0; background: none; color: var(--muted); font-weight: 600; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.link:hover { color: var(--ink); }
+
+main { min-width: 0; padding: 0 24px 140px; }
+
+/* ---------- toolbar ---------- */
+.toolbar {
+  position: sticky; top: var(--head); z-index: 10; background: var(--paper);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 16px 0 12px;
+}
+.view-title { margin: 0 8px 0 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+.search {
+  flex: 1 1 200px; max-width: 320px; height: 34px; padding: 0 12px 0 34px;
+  border: 1px solid var(--rule); border-radius: 8px; background: var(--surface);
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='7' cy='7' r='4.5' fill='none' stroke='%238a95a5' stroke-width='1.6'/><path d='M10.5 10.5l3 3' stroke='%238a95a5' stroke-width='1.6' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat; background-position: 11px center; background-size: 15px;
+}
+.search::placeholder { color: var(--faint); }
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 9px; background: var(--sunk); }
+.seg button {
+  height: 28px; padding: 0 11px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--muted); font-weight: 600; font-size: 13px;
+}
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+.tool-gap { flex: 1; }
+.meta { margin: -4px 0 10px; min-height: 18px; color: var(--muted); font-size: 12.5px; }
+
+.add-row { display: flex; gap: 8px; flex: 1 1 320px; max-width: 520px; }
+.add-row input {
+  flex: 1; height: 34px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface);
+}
+.add-row input::placeholder { color: var(--faint); }
+
+.notice {
+  margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+  background: var(--hold-tint); color: var(--ink);
+}
+.notice.info { background: var(--sunk); color: var(--muted); }
+.notice p { margin: 0; }
+.notice p + p { margin-top: 4px; }
+
+.progress { height: 2px; margin: 0 0 -2px; overflow: hidden; position: relative; z-index: 1; }
+.progress::before {
+  content: ""; position: absolute; inset: 0; width: 30%; background: var(--blue); border-radius: 2px;
+  animation: slide 1s ease-in-out infinite;
+}
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+
+/* ---------- rows ---------- */
+.card {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden;
+}
+.list { margin: 0; padding: 0; list-style: none; }
+.list:focus { outline: none; }
+.list:focus-visible { box-shadow: 0 0 0 2px var(--blue); }
+.cols, .row {
+  display: grid; align-items: center; column-gap: 16px; padding: 0 16px 0 12px;
+}
+.view-senders { --cols: 22px 44px minmax(0, 1.1fr) minmax(0, 1.5fr) 76px; }
+.view-mail { --cols: 22px minmax(0, 1fr) minmax(0, 1.7fr) 76px; }
+.view-list { --cols: 22px minmax(0, 1fr) auto; }
+.cols, .row { grid-template-columns: var(--cols); }
+.cols {
+  height: 34px; font-size: 12px; font-weight: 600; color: var(--faint);
+}
+.cols .num, .row .num { text-align: right; }
+.cols .when, .row .when { text-align: right; }
+
+.row {
+  min-height: 52px; padding-top: 7px; padding-bottom: 7px;
+  border-top: 1px solid var(--rule); cursor: pointer; user-select: none;
+  position: relative;
+}
+.list > .row:first-child { border-top: 0; }
+.cols + .list > .row:first-child { border-top: 1px solid var(--rule); }
+.row:hover { background: var(--paper); }
+.row[aria-selected="true"] { background: var(--blue-tint); }
+.row[aria-selected="true"]::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--blue);
+}
+.row.cursor { box-shadow: inset 0 0 0 2px var(--blue); }
+.list:not(:focus-visible) .row.cursor { box-shadow: none; }
+.row.off { cursor: default; color: var(--faint); }
+.row.gone { opacity: .45; }
+
+.check {
+  width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--faint);
+  display: grid; place-items: center; background: var(--surface);
+}
+.row[aria-selected="true"] .check { background: var(--blue); border-color: var(--blue); }
+.row[aria-selected="true"] .check::after {
+  content: ""; width: 9px; height: 5px; margin-top: -2px;
+  border-left: 2px solid var(--on-ink); border-bottom: 2px solid var(--on-ink); transform: rotate(-45deg);
+}
+.row.off .check { opacity: .35; }
+
+.who { min-width: 0; }
+.addr { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.addr .dom { color: var(--muted); font-weight: 500; }
+.name { display: block; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subj { min-width: 0; }
+.subj .line { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.tag {
+  font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 5px; white-space: nowrap;
+  background: var(--sunk); color: var(--muted);
+}
+.tag.del { background: var(--del-tint); color: var(--del); }
+.tag.hold { background: var(--hold-tint); color: var(--hold); }
+.tag.keep { background: var(--keep-tint); color: var(--keep); }
+.num { font-weight: 650; }
+.when { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+.empty { padding: 48px 24px; text-align: center; color: var(--muted); }
+.empty strong { display: block; color: var(--ink); font-size: 15px; margin-bottom: 4px; }
+.empty .btn { margin-top: 14px; }
+
+/* ---------- the sorting tray ---------- */
+.tray {
+  position: fixed; z-index: 30; left: calc(210px + (100vw - 210px) / 2); bottom: 20px;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 18px;
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; box-shadow: var(--shadow);
+  max-width: calc(100vw - 32px);
+}
+.tray.show { animation: rise .16s ease-out; }
+@keyframes rise { from { transform: translate(-50%, 12px); opacity: 0; } }
+.tray .count { font-weight: 650; margin-right: 8px; white-space: nowrap; }
+.verdict {
+  display: inline-flex; align-items: center; gap: 10px; height: 42px; padding: 0 12px 0 16px;
+  border: 0; border-radius: 10px; font-weight: 650; font-size: 14px; white-space: nowrap;
+  color: var(--on-ink);
+}
+.verdict:hover:not(:disabled) { filter: brightness(1.08); }
+.verdict:disabled { opacity: .45; cursor: default; }
+.verdict.del { background: var(--del); }
+.verdict.hold { background: var(--hold); }
+.verdict.keep { background: var(--keep); }
+.verdict.remove { background: var(--sunk); color: var(--ink); }
+.verdict.remove kbd { background: var(--surface); }
+.tray .clear { height: 42px; }
+
+/* ---------- toasts ---------- */
+.toasts {
+  position: fixed; z-index: 40; right: 20px; bottom: 20px; width: min(380px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+}
+.toast {
+  pointer-events: auto; display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 12px 12px 16px; border-radius: 12px; box-shadow: var(--shadow);
+  background: var(--ink); color: var(--paper); animation: rise-r .16s ease-out;
+}
+@keyframes rise-r { from { transform: translateY(8px); opacity: 0; } }
+.tray-open .toasts { bottom: 92px; }
+.toast.bad { background: var(--del); color: var(--on-ink); }
+.toast p { margin: 0; flex: 1; white-space: pre-line; overflow-wrap: anywhere; }
+.toast button {
+  border: 0; background: transparent; color: inherit; font-weight: 700; padding: 0 4px;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.toast .x { text-decoration: none; opacity: .7; font-size: 16px; line-height: 1; }
+
+/* ---------- token dialog ---------- */
+dialog {
+  border: 1px solid var(--rule); border-radius: 14px; padding: 22px; width: min(440px, calc(100vw - 32px));
+  background: var(--surface); color: var(--ink); box-shadow: var(--shadow);
+}
+dialog::backdrop { background: rgb(10 14 20 / .45); }
+dialog h2 { margin: 0 0 6px; font-size: 17px; }
+dialog p { margin: 0 0 16px; color: var(--muted); }
+dialog input {
+  width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--paper); margin-bottom: 16px;
+}
+dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
+code { font: 600 12.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* ---------- small screens ---------- */
+@media (max-width: 760px) {
+  :root { --head: 52px; }
+  .app-head { padding: 0 12px; gap: 8px; }
+  .brand span, .status .label-long { display: none; }
+  .shell { grid-template-columns: 1fr; }
+  .side {
+    position: sticky; top: var(--head); z-index: 15; height: auto; padding: 8px 12px;
+    display: flex; gap: 4px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--rule);
+    background: var(--paper);
   }
-  header {
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
-    position: sticky; top: 0; z-index: 5;
+  .side h2, .side .help { display: none; }
+  .side { scrollbar-width: none; }
+  .side::-webkit-scrollbar { display: none; }
+  .nav-item { width: auto; flex: none; }
+  main { padding: 0 12px 150px; }
+  .toolbar { top: calc(var(--head) + 50px); padding: 10px 0 8px; gap: 8px; }
+  .seg button { padding: 0 9px; }
+  #refresh { padding: 0 8px; }
+  #refresh span { display: none; }
+  .view-title { display: none; }
+  .search { max-width: none; }
+  .cols { display: none; }
+  .view-senders, .view-mail { --cols: 22px minmax(0, 1fr) auto; }
+  .row .subj { grid-column: 2 / -1; }
+  .row .num { display: none; }
+  .row .when { grid-row: 1; grid-column: 3; }
+  .row .who { grid-row: 1; grid-column: 2; }
+  .tray {
+    left: 8px; right: 8px; bottom: 8px; transform: none; max-width: none;
+    flex-wrap: wrap; gap: 6px; padding: 8px;
   }
-  h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .02em; }
-  .spacer { flex: 1; }
-  .pill {
-    font-size: 12px; padding: 3px 9px; border-radius: 999px;
-    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
-  }
-  .pill.live { color: var(--bad); border-color: #4a2a2a; }
-  .pill.dry { color: var(--warn); border-color: #4a3f2a; }
-  .pill.ok { color: var(--good); border-color: #2c4436; }
-  button, select, input[type=text], input[type=number], input[type=password] {
-    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-    border-radius: 7px; padding: 6px 10px; font: inherit;
-  }
-  button { cursor: pointer; }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.primary { border-color: #2f5d80; color: #cfe8fb; }
-  button.danger { border-color: #5a2f2f; color: #f0b7b2; }
-  nav {
-    display: flex; gap: 6px; padding: 10px 18px 0; background: var(--bg); flex-wrap: wrap;
-  }
-  nav button { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; color: var(--dim); }
-  nav button.active { background: var(--panel); color: var(--text); border-color: var(--line); border-bottom-color: var(--panel); }
-  main { padding: 0 18px 40px; }
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: 0 8px 8px 8px; padding: 14px; }
-  section[hidden] { display: none; }
-  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-  .toolbar label { color: var(--dim); font-size: 12px; display: flex; gap: 6px; align-items: center; }
-  .toolbar input[type=number] { width: 78px; }
-  .info { color: var(--dim); font-size: 12px; margin-left: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
-  tbody tr:hover { background: #1a2029; }
-  td.num, th.num { text-align: right; width: 64px; }
-  td.sel, th.sel { width: 28px; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
-  .dim { color: var(--dim); }
-  .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--dim); margin-left: 6px; white-space: nowrap; }
-  .tag.bl { color: var(--bad); border-color: #5a2f2f; }
-  .tag.q { color: var(--accent); border-color: #2f5d80; }
-  .tag.spam { color: var(--warn); border-color: #4a3f2a; }
-  .empty { color: var(--dim); padding: 18px 4px; }
-  #toast {
-    position: fixed; right: 18px; bottom: 18px; max-width: 420px; z-index: 20;
-    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-    padding: 10px 14px; box-shadow: 0 8px 30px #0008; opacity: 0; transform: translateY(8px);
-    transition: opacity .18s, transform .18s; pointer-events: none; white-space: pre-wrap;
-  }
-  #toast.show { opacity: 1; transform: none; }
-  #toast.err { border-color: #5a2f2f; }
-  dialog {
-    background: var(--panel); color: var(--text); border: 1px solid var(--line);
-    border-radius: 10px; padding: 18px; max-width: 420px; width: calc(100% - 36px);
-  }
-  dialog::backdrop { background: #000a; }
-  dialog h2 { margin: 0 0 6px; font-size: 15px; }
-  dialog p { color: var(--dim); font-size: 12.5px; margin: 0 0 12px; }
-  dialog input { width: 100%; margin-bottom: 12px; }
-  .row { display: flex; gap: 8px; }
-  .row input { flex: 1; }
-  ul.bl { list-style: none; margin: 0; padding: 0; }
-  ul.bl li { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
-  ul.bl li .mono { flex: 1; }
+  .tray.show { animation: none; }
+  .tray .count { flex: 1 0 calc(100% - 90px); margin: 0 0 0 6px; font-size: 13px; }
+  .tray .clear { order: 1; height: 30px; padding: 0 8px; }
+  .verdict { order: 2; flex: 1 1 0; justify-content: center; height: 40px; padding: 0 8px; font-size: 13px; }
+  .verdict[hidden] { display: none; }
+  .verdict kbd { display: none; }
+  .toasts { right: 8px; bottom: 16px; width: calc(100vw - 16px); }
+  .tray-open .toasts { bottom: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>Gmail Spam Assassin</h1>
-  <span id="mode-pill" class="pill">loading…</span>
-  <span id="run-pill" class="pill">last run –</span>
-  <span class="spacer"></span>
-  <button id="btn-refresh" title="Reload the current tab">Refresh</button>
-  <button id="btn-run" class="primary">Run now</button>
-  <button id="btn-token" title="Set the API token">token</button>
+<header class="app-head">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#10131a"/><circle cx="16" cy="16" r="10.5" fill="none" stroke="#e2695f" stroke-width="2.6"/><path d="M16 2v5.5M16 24.5V30M2 16h5.5M24.5 16H30" stroke="#e2695f" stroke-width="2.8" stroke-linecap="round"/><rect x="9.5" y="11.5" width="13" height="9.5" rx="1.4" fill="#dfe5ef"/><path d="M10.5 12.8l5.5 4 5.5-4" fill="none" stroke="#10131a" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <span>Gmail Spam Assassin</span>
+  </div>
+  <span id="mode" class="mode" hidden></span>
+  <span class="head-gap"></span>
+  <details class="status" id="status">
+    <summary><span class="dot" id="status-dot"></span><span id="status-text">Connecting</span></summary>
+    <div class="status-panel" id="status-panel"></div>
+  </details>
+  <button class="btn primary" id="run">Run now</button>
 </header>
 
-<nav>
-  <button data-tab="mail" class="active">Recent mail</button>
-  <button data-tab="senders">Senders</button>
-  <button data-tab="blacklist">Blacklist</button>
-  <button data-tab="whitelist">Whitelist</button>
-  <button data-tab="quarantine">Quarantine</button>
-</nav>
-
-<main>
-  <section id="tab-mail">
-    <div class="toolbar">
-      <label>days <input id="days" type="number" value="30" min="1" max="365"></label>
-      <label>limit <input id="limit" type="number" value="200" min="1" max="1000"></label>
-      <label>folder
-        <select id="folder">
-          <option value="all">all + spam</option>
-          <option value="inbox">inbox</option>
-          <option value="spam">spam</option>
-        </select>
-      </label>
-      <button id="btn-add-mail" disabled>Add to blacklist</button>
-      <button id="btn-hide-mail" disabled>Add to whitelist</button>
-      <button id="btn-q-mail" disabled>Add to quarantine</button>
-      <span class="info" id="mail-info"></span>
+<div class="shell">
+  <nav class="side" aria-label="Views">
+    <h2>Review</h2>
+    <button class="nav-item" data-view="senders"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5.5" r="2.7"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>Senders</button>
+    <button class="nav-item" data-view="mail"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3.5" width="12" height="9" rx="1.6"/><path d="M2.6 4.6 8 8.6l5.4-4"/></svg>Recent mail</button>
+    <h2>Lists</h2>
+    <button class="nav-item" data-view="blacklist"><span class="swatch del"></span>Blacklist<span class="count" id="n-blacklist"></span></button>
+    <button class="nav-item" data-view="quarantine"><span class="swatch hold"></span>Quarantine<span class="count" id="n-quarantine"></span></button>
+    <button class="nav-item" data-view="whitelist"><span class="swatch keep"></span>Whitelist<span class="count" id="n-whitelist"></span></button>
+    <div class="help">
+      <p>Click a row to select it. Shift-click selects a range.</p>
+      <dl class="keys">
+        <dt><kbd>J</kbd><kbd>K</kbd></dt><dd>Move</dd>
+        <dt><kbd>X</kbd></dt><dd>Select</dd>
+        <dt><kbd>B</kbd><kbd>Q</kbd><kbd>W</kbd></dt><dd>Add to a list</dd>
+        <dt><kbd>/</kbd></dt><dd>Filter</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Clear selection</dd>
+      </dl>
+      <button class="link" id="token">Change API token</button>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th class="sel"><input type="checkbox" id="check-all-mail" title="select all"></th>
-          <th style="width:140px">date</th>
-          <th style="width:260px">from</th>
-          <th>subject</th>
-        </tr>
-      </thead>
-      <tbody id="mail-body"></tbody>
-    </table>
-  </section>
+  </nav>
 
-  <section id="tab-senders" hidden>
+  <main>
     <div class="toolbar">
-      <label>days <input id="sdays" type="number" value="30" min="1" max="365"></label>
-      <button id="btn-add-senders" disabled>Add to blacklist</button>
-      <button id="btn-hide-senders" disabled>Add to whitelist</button>
-      <button id="btn-q-senders" disabled>Add to quarantine</button>
-      <span class="info" id="senders-info"></span>
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th class="sel"><input type="checkbox" id="check-all-senders" title="select all"></th>
-          <th class="num">count</th>
-          <th style="width:280px">address</th>
-          <th style="width:130px">latest</th>
-          <th>latest subject</th>
-        </tr>
-      </thead>
-      <tbody id="senders-body"></tbody>
-    </table>
-  </section>
-
-  <section id="tab-blacklist" hidden>
-    <div class="toolbar">
-      <div class="row" style="flex:1">
-        <input id="bl-input" type="text" placeholder="add an address (a@b.com) or a domain (@b.com)">
-        <button id="btn-add-manual" class="primary">Add to blacklist</button>
+      <h1 class="view-title" id="title">Senders</h1>
+      <input class="search" id="search" type="search" placeholder="Filter by sender or subject" autocomplete="off" spellcheck="false" aria-label="Filter">
+      <div class="add-row" id="add-row" hidden>
+        <input id="add-input" type="text" placeholder="Address or @domain" autocomplete="off" spellcheck="false" aria-label="Address or domain to add">
+        <button class="verdict" id="add-btn">Add</button>
       </div>
-      <span class="info" id="bl-info"></span>
-    </div>
-    <ul class="bl" id="bl-list"></ul>
-  </section>
-
-  <section id="tab-whitelist" hidden>
-    <div class="toolbar">
-      <div class="row" style="flex:1">
-        <input id="wl-input" type="text" placeholder="never delete or list: a@b.com or @b.com">
-        <button id="btn-add-manual-wl" class="primary">Add to whitelist</button>
+      <div class="seg" id="days" role="group" aria-label="Time window">
+        <button data-days="1">1 day</button>
+        <button data-days="7">7 days</button>
+        <button data-days="30">30 days</button>
+        <button data-days="90">90 days</button>
       </div>
-      <span class="info" id="wl-info"></span>
-    </div>
-    <p class="dim" style="margin:0 0 10px">
-      These senders are never moved to Trash, even if they also match the blacklist,
-      and they are hidden from Recent mail and Senders.
-    </p>
-    <ul class="bl" id="wl-list"></ul>
-  </section>
-
-  <section id="tab-quarantine" hidden>
-    <div class="toolbar">
-      <div class="row" style="flex:1">
-        <input id="q-input" type="text" placeholder="hold then delete: a@b.com or @b.com">
-        <button id="btn-add-manual-q" class="primary">Add to quarantine</button>
+      <div class="seg" id="folder" role="group" aria-label="Folder">
+        <button data-folder="all">All</button>
+        <button data-folder="inbox">Inbox</button>
+        <button data-folder="spam">Spam</button>
       </div>
-      <span class="info" id="q-info"></span>
+      <span class="tool-gap"></span>
+      <button class="btn quiet" id="refresh" title="Fetch again from Gmail (R)" aria-label="Refresh from Gmail"><svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 6.5A5.3 5.3 0 1 0 13.4 9.5"/><path d="M13.6 2.8v3.9H9.7"/></svg><span>Refresh</span></button>
     </div>
-    <p class="dim" style="margin:0 0 10px">
-      New mail is labelled and taken out of Inbox. Mail older than the configured
-      age goes straight to Trash; held mail expires as it crosses that age.
-      A whitelist entry always wins. The label and age come from
-      <span class="mono">QUARANTINE_LABEL</span> and
-      <span class="mono">QUARANTINE_AGE</span>.
-    </p>
-    <ul class="bl" id="q-list"></ul>
-  </section>
-</main>
+    <p class="meta" id="meta"></p>
+    <div id="notices"></div>
+    <div class="progress" id="progress" hidden></div>
+    <div id="table"></div>
+  </main>
+</div>
 
-<div id="toast"></div>
+<div class="tray" id="tray" hidden role="toolbar" aria-label="Apply to selection">
+  <span class="count" id="tray-count"></span>
+  <button class="verdict remove" data-act="remove">Remove <kbd>Del</kbd></button>
+  <button class="verdict del" data-act="blacklist">Blacklist <kbd>B</kbd></button>
+  <button class="verdict hold" data-act="quarantine">Quarantine <kbd>Q</kbd></button>
+  <button class="verdict keep" data-act="whitelist">Whitelist <kbd>W</kbd></button>
+  <button class="btn quiet clear" data-act="clear">Clear</button>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <dialog id="token-dialog">
   <h2>API token</h2>
-  <p>Paste the <span class="mono">SPAM_API_TOKEN</span> from <span class="mono">compose.override.yml</span>. It is stored in this browser only.</p>
-  <input id="token-input" type="password" autocomplete="off" spellcheck="false">
-  <div class="row">
-    <button id="token-save" class="primary">Save</button>
-    <button id="token-clear" class="danger">Forget</button>
+  <p>Paste <code>SPAM_API_TOKEN</code> from <code>compose.override.yml</code>. It stays in this browser.</p>
+  <input id="token-input" type="password" autocomplete="off" spellcheck="false" aria-label="API token">
+  <div class="actions">
+    <button class="btn quiet" id="token-forget">Forget token</button>
+    <button class="btn primary" id="token-save">Save</button>
   </div>
 </dialog>
 
 <script>
 "use strict";
 
+/* ================================================================
+   State
+   ================================================================ */
 const TOKEN_KEY = "spam_assassin_token";
-const $ = (id) => document.getElementById(id);
-
-const state = {
-  tab: "mail",
-  status: null,
-  selectedMail: new Set(),
-  selectedSenders: new Set(),
-  busy: false,
-  mailAbort: null,
-  sendersAbort: null,
-  mailSeq: 0,
-  sendersSeq: 0,
+const PREF_KEY = "spam_assassin_prefs";
+const STALE_MS = 60000;
+const LISTS = ["blacklist", "quarantine", "whitelist"];
+const VERDICT = {
+  blacklist: { tone: "del", done: "Blacklisted", tag: "Blacklisted" },
+  quarantine: { tone: "hold", done: "Quarantined", tag: "Quarantined" },
+  whitelist: { tone: "keep", done: "Whitelisted", tag: "Whitelisted" },
+};
+const TITLES = {
+  senders: "Senders", mail: "Recent mail",
+  blacklist: "Blacklist", quarantine: "Quarantine", whitelist: "Whitelist",
+};
+const PLACEHOLDER = {
+  blacklist: "Address or @domain to trash from now on",
+  quarantine: "Address or @domain to hold, then delete",
+  whitelist: "Address or @domain to always keep",
 };
 
-/* ---------- helpers ---------- */
-function token() { return localStorage.getItem(TOKEN_KEY) || ""; }
+const $ = (id) => document.getElementById(id);
+const prefs = (() => {
+  try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; }
+})();
 
-function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+const S = {
+  view: TITLES[prefs.view] ? prefs.view : "senders",
+  days: [1, 7, 30, 90].includes(prefs.days) ? prefs.days : 30,
+  folder: ["all", "inbox", "spam"].includes(prefs.folder) ? prefs.folder : "all",
+  query: "",
+  cache: {},        // key -> { at, data }
+  loading: {},      // key -> AbortController
+  rows: [],         // visible items: { key, i, item }
+  sel: new Set(),   // selected keys
+  anchor: -1,
+  cursor: -1,
+  status: null,
+  runId: null,
+  busy: false,
+};
 
-function debounce(fn, ms) {
-  let timer = null;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
-  };
+function savePrefs() {
+  localStorage.setItem(PREF_KEY, JSON.stringify({ view: S.view, days: S.days, folder: S.folder }));
+}
+const isReview = (v = S.view) => v === "senders" || v === "mail";
+
+/* ================================================================
+   Helpers
+   ================================================================ */
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ESC[c]);
+const plural = (n, one, many) => n + " " + (n === 1 ? one : (many || one + "s"));
+const fmtN = (n) => (n == null ? "–" : Number(n).toLocaleString());
+
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const dayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const dateFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const yearFmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
+const fullFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+function when(iso) {
+  if (!iso) return { short: "", full: "" };
+  const d = new Date(iso);
+  if (isNaN(d)) return { short: iso, full: iso };
+  const now = new Date();
+  const days = (now - d) / 86400000;
+  let short;
+  if (d.toDateString() === now.toDateString()) short = timeFmt.format(d);
+  else if (days < 6) short = dayFmt.format(d);
+  else if (d.getFullYear() === now.getFullYear()) short = dateFmt.format(d);
+  else short = yearFmt.format(d);
+  return { short, full: fullFmt.format(d) };
 }
 
-function toast(message, isError) {
-  const box = $("toast");
-  box.textContent = message;
-  box.className = "show" + (isError ? " err" : "");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { box.className = ""; }, 6000);
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (isNaN(s)) return iso;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
 }
+
+function addrHtml(addr) {
+  if (!addr) return '<span class="addr">Unknown sender</span>';
+  const at = addr.lastIndexOf("@");
+  if (at <= 0) return '<span class="addr">' + esc(addr) + "</span>";
+  return '<span class="addr">' + esc(addr.slice(0, at)) + '<span class="dom">' + esc(addr.slice(at)) + "</span></span>";
+}
+
+function entryHtml(entry) {
+  if (entry.startsWith("@")) {
+    return '<span class="addr"><span class="dom">Everyone at </span>' + esc(entry.slice(1)) + "</span>";
+  }
+  return addrHtml(entry);
+}
+
+/* ================================================================
+   API
+   ================================================================ */
+const token = () => localStorage.getItem(TOKEN_KEY) || "";
 
 async function api(method, path, body, signal) {
   const headers = { "X-Api-Token": token() };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  let response;
+  let res;
   try {
-    response = await fetch(path, {
-      method,
-      headers,
-      signal,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    res = await fetch(path, { method, headers, signal, body: body === undefined ? undefined : JSON.stringify(body) });
   } catch (err) {
     if (err.name === "AbortError") throw err;
-    throw new Error("cannot reach the API: " + err.message);
+    throw new Error("Cannot reach the server. Check that the container is running.");
   }
-  if (response.status === 401) {
-    openTokenDialog();
-    throw new Error("unauthorized: set the API token");
+  if (res.status === 401) {
+    openToken();
+    throw new Error("The API token is missing or wrong. Enter it to continue.");
   }
-  const data = await response.json().catch(() => ({ error: "invalid JSON from API" }));
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  let data;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (data === null || typeof data !== "object") {
+    const err = new Error("The server sent a reply that is not JSON (HTTP " + res.status + "). Check the proxy in front of the container.");
+    err.status = res.status;
+    throw err;
+  }
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
-function el(tag, props, children) {
-  const node = document.createElement(tag);
-  if (props) for (const [key, value] of Object.entries(props)) {
-    if (key === "class") node.className = value;
-    else if (key === "text") node.textContent = value;
-    else if (key === "html") node.innerHTML = value;
-    else node.setAttribute(key, value);
+/* ================================================================
+   Data per view
+   ================================================================ */
+function cacheKey(view = S.view) {
+  if (view === "senders") return "senders:" + S.days;
+  if (view === "mail") return "mail:" + S.days + ":" + S.folder;
+  return view;
+}
+
+function pathFor(view, force) {
+  const r = force ? "&refresh=1" : "";
+  if (view === "senders") return "/senders?days=" + S.days + "&limit=1000" + r;
+  if (view === "mail") return "/messages?days=" + S.days + "&limit=1000&folder=" + S.folder + r;
+  return "/" + view;
+}
+
+async function load(force) {
+  const view = S.view;
+  const key = cacheKey();
+  const hit = S.cache[key];
+  if (hit && !force && Date.now() - hit.at < STALE_MS) return;
+  if (S.loading[key]) {
+    if (!force) return;
+    S.loading[key].abort();
   }
-  for (const child of children || []) {
-    if (child == null) continue;
-    node.append(typeof child === "string" ? document.createTextNode(child) : child);
-  }
-  return node;
-}
-
-function fmtDate(iso) {
-  if (!iso) return "–";
-  const date = new Date(iso);
-  if (isNaN(date)) return iso;
-  const pad = (n) => String(n).padStart(2, "0");
-  return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
-    + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
-}
-
-/* ---------- token dialog ---------- */
-function openTokenDialog() {
-  const dialog = $("token-dialog");
-  $("token-input").value = token();
-  if (typeof dialog.showModal !== "function") return;
-  if (dialog.open) return;
-  dialog.showModal();
-}
-
-$("btn-token").addEventListener("click", openTokenDialog);
-$("token-save").addEventListener("click", () => {
-  localStorage.setItem(TOKEN_KEY, $("token-input").value.trim());
-  $("token-dialog").close();
-  refresh();
-});
-$("token-clear").addEventListener("click", () => {
-  localStorage.removeItem(TOKEN_KEY);
-  $("token-dialog").close();
-  toast("token forgotten");
-});
-
-/* ---------- status ---------- */
-async function loadStatus() {
-  const data = await api("GET", "/status");
-  state.status = data;
-  const modePill = $("mode-pill");
-  modePill.textContent = data.mode + (data.dry_run ? " · dry run" : " · deleting");
-  modePill.className = "pill " + (data.dry_run ? "dry" : "live");
-
-  const st = data.state || {};
-  const runPill = $("run-pill");
-  const when = st.last_run ? fmtDate(st.last_run) : "never";
-  runPill.textContent = data.running
-    ? "running" + (st.running_phase ? " · " + st.running_phase : "…")
-    : "last run " + when;
-  runPill.className = "pill " + (st.last_ok === false ? "live" : "ok");
-  runPill.title = "matched=" + (st.last_matched ?? "–")
-    + " trashed=" + (st.last_trashed ?? "–")
-    + " would_trash=" + (st.last_would_trash ?? "–")
-    + " filed=" + (st.last_filed ?? "–")
-    + " expired=" + (st.last_expired ?? "–")
-    + " held=" + (st.last_held ?? "–")
-    + (st.last_error ? "\n" + st.last_error : "");
-  $("btn-run").textContent = data.running ? "running…" : "Run now";
-  $("btn-run").disabled = !!data.running;
-  return data;
-}
-
-/* ---------- tabs ---------- */
-function showTab(name) {
-  state.tab = name;
-  for (const button of document.querySelectorAll("nav button")) {
-    button.classList.toggle("active", button.dataset.tab === name);
-  }
-  for (const tab of ["mail", "senders", "blacklist", "whitelist", "quarantine"]) {
-    $("tab-" + tab).hidden = tab !== name;
-  }
-  if (name === "mail") loadMail();
-  if (name === "senders") loadSenders();
-  if (name === "blacklist") loadBlacklist();
-  if (name === "whitelist") loadWhitelist();
-  if (name === "quarantine") loadQuarantine();
-}
-for (const button of document.querySelectorAll("nav button")) {
-  button.addEventListener("click", () => showTab(button.dataset.tab));
-}
-
-/* ---------- mail ---------- */
-function updateMailButton() {
-  $("btn-add-mail").disabled = state.selectedMail.size === 0 || state.busy;
-  $("btn-hide-mail").disabled = $("btn-add-mail").disabled;
-  $("btn-q-mail").disabled = $("btn-add-mail").disabled;
-  const n = state.selectedMail.size;
-  $("btn-add-mail").textContent = n ? "Add " + n + " to blacklist" : "Add to blacklist";
-  $("btn-hide-mail").textContent = n ? "Add " + n + " to whitelist" : "Add to whitelist";
-  $("btn-q-mail").textContent = n ? "Add " + n + " to quarantine" : "Add to quarantine";
-}
-
-async function loadMail(refresh) {
-  const body = $("mail-body");
-  const seq = ++state.mailSeq;
-  if (state.mailAbort) state.mailAbort.abort();
-  const controller = new AbortController();
-  state.mailAbort = controller;
-  body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "4", text: "loading…" })]));
+  const ctl = new AbortController();
+  S.loading[key] = ctl;
+  showProgress();
   try {
-    const query = new URLSearchParams({
-      days: $("days").value || "30",
-      limit: $("limit").value || "200",
-      folder: $("folder").value,
-    });
-    if (refresh) query.set("refresh", "1");
-    const data = await api("GET", "/messages?" + query.toString(), undefined, controller.signal);
-    if (seq !== state.mailSeq) return;
-    state.selectedMail.clear();
-    body.replaceChildren();
-    if (!data.messages.length) {
-      body.append(el("tr", null, [el("td", { class: "empty", colspan: "4", text: "no messages in that window" })]));
-    }
-    for (const row of data.messages) {
-      const box = el("input", { type: "checkbox" });
-      box.dataset.address = row.from_addr || "";
-      box.disabled = !row.from_addr || !!row.blacklisted;
-      box.addEventListener("change", () => {
-        if (box.checked) state.selectedMail.add(row.from_addr);
-        else state.selectedMail.delete(row.from_addr);
-        updateMailButton();
-      });
-      const from = el("div", null, [
-        el("div", { class: "mono", text: row.from_addr || "(unknown)" }),
-        row.from_name ? el("div", { class: "dim", text: row.from_name }) : null,
-        row.blacklisted ? el("span", { class: "tag bl", text: "blacklisted" }) : null,
-        row.quarantined ? el("span", { class: "tag q", text: "quarantine" }) : null,
-        row.folder === "Spam" ? el("span", { class: "tag spam", text: "spam" }) : null,
-      ]);
-      body.append(el("tr", null, [
-        el("td", { class: "sel" }, [box]),
-        el("td", { class: "mono dim", text: fmtDate(row.date) }),
-        el("td", null, [from]),
-        el("td", null, [
-          el("div", { text: row.subject || "(no subject)" }),
-          el("div", { class: "dim", style: "font-size:11.5px", text: (row.labels || []).join(" · ") }),
-        ]),
-      ]));
-    }
-    $("mail-info").textContent = data.count + " shown · " + data.scanned + " matched the search"
-      + (data.hidden ? " · " + data.hidden + " hidden by whitelist" : "");
-    updateMailButton();
+    const data = await api("GET", pathFor(view, force && isReview(view)), undefined, ctl.signal);
+    S.cache[key] = { at: Date.now(), data };
+    if (!isReview(view)) setCount(view, data.count);
+    if (cacheKey() === key) render();
   } catch (err) {
     if (err.name === "AbortError") return;
-    body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "4", text: err.message })]));
-  }
-}
-
-/* ---------- senders ---------- */
-function updateSendersButton() {
-  $("btn-add-senders").disabled = state.selectedSenders.size === 0 || state.busy;
-  $("btn-hide-senders").disabled = $("btn-add-senders").disabled;
-  $("btn-q-senders").disabled = $("btn-add-senders").disabled;
-  const n = state.selectedSenders.size;
-  $("btn-add-senders").textContent = n ? "Add " + n + " to blacklist" : "Add to blacklist";
-  $("btn-hide-senders").textContent = n ? "Add " + n + " to whitelist" : "Add to whitelist";
-  $("btn-q-senders").textContent = n ? "Add " + n + " to quarantine" : "Add to quarantine";
-}
-
-async function loadSenders(refresh) {
-  const body = $("senders-body");
-  const seq = ++state.sendersSeq;
-  if (state.sendersAbort) state.sendersAbort.abort();
-  const controller = new AbortController();
-  state.sendersAbort = controller;
-  body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "5", text: "loading…" })]));
-  try {
-    let query = "days=" + ($("sdays").value || "30");
-    if (refresh) query += "&refresh=1";
-    const data = await api("GET", "/senders?" + query, undefined, controller.signal);
-    if (seq !== state.sendersSeq) return;
-    state.selectedSenders.clear();
-    body.replaceChildren();
-    if (!data.senders.length) {
-      body.append(el("tr", null, [el("td", { class: "empty", colspan: "5", text: "no senders in that window" })]));
-    }
-    for (const row of data.senders) {
-      const box = el("input", { type: "checkbox" });
-      box.dataset.address = row.address || "";
-      box.disabled = !row.address || row.address === "(unknown)" || !!row.blacklisted;
-      box.addEventListener("change", () => {
-        if (box.checked) state.selectedSenders.add(row.address);
-        else state.selectedSenders.delete(row.address);
-        updateSendersButton();
-      });
-      body.append(el("tr", null, [
-        el("td", { class: "sel" }, [box]),
-        el("td", { class: "num mono", text: String(row.count) }),
-        el("td", null, [
-          el("div", { class: "mono", text: row.address }),
-          row.name ? el("div", { class: "dim", text: row.name }) : null,
-          row.blacklisted ? el("span", { class: "tag bl", text: "blacklisted" }) : null,
-          row.quarantined ? el("span", { class: "tag q", text: "quarantine" }) : null,
-        ]),
-        el("td", { class: "mono dim", text: fmtDate(row.latest_date) }),
-        el("td", { text: row.latest_subject || "" }),
-      ]));
-    }
-    $("senders-info").textContent = data.count + " sender(s), last " + data.days + " day(s)"
-      + (data.hidden ? " · " + data.hidden + " hidden by whitelist" : "");
-    updateSendersButton();
-  } catch (err) {
-    body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "5", text: err.message })]));
-  }
-}
-
-/* ---------- blacklist / whitelist / quarantine ---------- */
-const LISTS = {
-  blacklist: { prefix: "bl", empty: "empty — add an address above, or from the mail/senders tabs" },
-  whitelist: { prefix: "wl", empty: "empty — nothing is hidden" },
-  quarantine: { prefix: "q", empty: "empty — nothing is held" },
-};
-
-async function loadList(kind) {
-  const meta = LISTS[kind];
-  const list = $(meta.prefix + "-list");
-  list.replaceChildren(el("li", { class: "empty", text: "loading…" }));
-  try {
-    const data = await api("GET", "/" + kind);
-    list.replaceChildren();
-    if (!data.entries.length) {
-      list.append(el("li", { class: "empty", text: meta.empty }));
-    }
-    for (const entry of data.entries) {
-      const remove = el("button", { class: "danger", text: "remove" });
-      remove.addEventListener("click", async () => {
-        const notes = {
-          whitelist: "Mail from it becomes visible again.",
-          quarantine: "Mail already in the label stops being deleted when it ages out.",
-          blacklist: "Mail already in Trash stays there.",
-        };
-        const note = notes[kind] || "";
-        if (!confirm("Remove " + entry + " from the " + kind + "?\n\n" + note)) return;
-        try {
-          await api("POST", "/" + kind + "/remove", { addresses: [entry] });
-          toast("removed " + entry);
-          loadList(kind);
-        } catch (err) { toast(err.message, true); }
-      });
-      list.append(el("li", null, [el("span", { class: "mono", text: entry }), remove]));
-    }
-    let info = data.count + " entr" + (data.count === 1 ? "y" : "ies") + " · " + data.path;
-    if (kind === "quarantine" && data.label) {
-      info += " · " + data.label + " · " + data.age + " · older than " + data.cutoff;
-      const last = state.status && state.status.state ? state.status.state : {};
-      if (last.last_held != null) info += " · " + last.last_held + " held";
-      if (last.last_stale) info += " · " + last.last_stale + " stale";
-    }
-    $(meta.prefix + "-info").textContent = info;
-    for (const error of data.errors || []) {
-      toast("line " + error.line + " ignored: " + error.entry + " (" + error.reason + ")", true);
-    }
-  } catch (err) {
-    list.replaceChildren(el("li", { class: "empty", text: err.message }));
-  }
-}
-
-function loadBlacklist() { return loadList("blacklist"); }
-function loadWhitelist() { return loadList("whitelist"); }
-function loadQuarantine() { return loadList("quarantine"); }
-
-/* ---------- actions ---------- */
-async function addAddresses(addresses, after, endpoint) {
-  if (!addresses.length) return;
-  endpoint = endpoint || "/blacklist";
-  const listName = { "/blacklist": "blacklist", "/whitelist": "whitelist", "/quarantine": "quarantine" }[endpoint] || "blacklist";
-  state.busy = true;
-  try {
-    const result = await api("POST", endpoint, { addresses });
-    const parts = [];
-    if (result.added.length) parts.push("added " + result.added.length + " to " + listName);
-    if (result.skipped.length) parts.push("already on the " + listName);
-    if (result.errors.length) parts.push("rejected " + result.errors.length);
-    const moved = result.removed_from || {};
-    const movedNames = Object.keys(moved);
-    if (movedNames.length) {
-      parts.push("removed from " + movedNames.map((name) => name + " (" + moved[name].length + ")").join(" and "));
-    }
-    toast(parts.join(", ") + (result.added.length ? ":\n" + result.added.join("\n") : ""));
-    if (result.errors.length) {
-      toast(result.errors.map((e) => e.entry + ": " + e.reason).join("\n"), true);
-    }
-    if (after) after();
-  } catch (err) {
-    toast(err.message, true);
+    if (cacheKey() === key && !S.cache[key]) renderError(err.message);
+    else toast(err.message, { bad: true });
   } finally {
-    state.busy = false;
-    updateMailButton();
-    updateSendersButton();
+    if (S.loading[key] === ctl) delete S.loading[key];
+    showProgress();
   }
 }
 
-$("btn-add-mail").addEventListener("click", () => {
-  addAddresses([...state.selectedMail], loadMail);
-});
-$("btn-hide-mail").addEventListener("click", () => {
-  addAddresses([...state.selectedMail], loadMail, "/whitelist");
-});
-$("btn-q-mail").addEventListener("click", () => {
-  addAddresses([...state.selectedMail], loadMail, "/quarantine");
-});
-$("btn-add-senders").addEventListener("click", () => {
-  addAddresses([...state.selectedSenders], loadSenders);
-});
-$("btn-hide-senders").addEventListener("click", () => {
-  addAddresses([...state.selectedSenders], loadSenders, "/whitelist");
-});
-$("btn-q-senders").addEventListener("click", () => {
-  addAddresses([...state.selectedSenders], loadSenders, "/quarantine");
-});
-$("btn-add-manual").addEventListener("click", () => {
-  const value = $("bl-input").value.trim();
-  if (!value) return;
-  const entries = value.split(/[\s,;]+/).filter(Boolean);
-  addAddresses(entries, () => { $("bl-input").value = ""; loadBlacklist(); });
-});
-$("bl-input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") $("btn-add-manual").click();
-});
-$("btn-add-manual-wl").addEventListener("click", () => {
-  const value = $("wl-input").value.trim();
-  if (!value) return;
-  const entries = value.split(/[\s,;]+/).filter(Boolean);
-  addAddresses(entries, () => { $("wl-input").value = ""; loadWhitelist(); }, "/whitelist");
-});
-$("wl-input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") $("btn-add-manual-wl").click();
-});
-$("btn-add-manual-q").addEventListener("click", () => {
-  const value = $("q-input").value.trim();
-  if (!value) return;
-  const entries = value.split(/[\s,;]+/).filter(Boolean);
-  addAddresses(entries, () => { $("q-input").value = ""; loadQuarantine(); }, "/quarantine");
-});
-$("q-input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") $("btn-add-manual-q").click();
-});
+function showProgress() {
+  $("progress").hidden = !S.loading[cacheKey()];
+}
 
-function toastRun(data) {
-  if (!data) return;
-  if (data.skipped) {
-    toast("run skipped: " + data.skipped, true);
+/* Items for the current view, filtered by the search box. */
+function items() {
+  const hit = S.cache[cacheKey()];
+  if (!hit) return null;
+  const q = S.query.trim().toLowerCase();
+  const d = hit.data;
+  let list;
+  if (S.view === "senders") {
+    list = (d.senders || []).filter((s) => !s._hidden).map((s) => ({ key: s.address === "(unknown)" ? "" : s.address, item: s }));
+  } else if (S.view === "mail") {
+    list = (d.messages || []).filter((m) => !m._hidden).map((m) => ({ key: m.from_addr || "", item: m }));
+  } else {
+    list = (d.entries || []).map((e) => ({ key: e, item: { entry: e } }));
+  }
+  if (!q) return list;
+  return list.filter(({ item }) => {
+    const hay = [item.address, item.from_addr, item.name, item.from_name, item.subject, item.latest_subject, item.entry]
+      .filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+/* ================================================================
+   Rendering
+   ================================================================ */
+function tagsHtml(item) {
+  const out = [];
+  if (item.blacklisted) out.push('<span class="tag del" title="Matches ' + esc(item.blacklisted) + '">Blacklisted</span>');
+  if (item.quarantined) out.push('<span class="tag hold" title="Matches ' + esc(item.quarantined) + '">Quarantined</span>');
+  if (item._kept) out.push('<span class="tag keep">Whitelisted</span>');
+  if (item.folder === "Spam") out.push('<span class="tag">In spam</span>');
+  return out.length ? '<span class="tags">' + out.join("") + "</span>" : "";
+}
+
+function rowHtml(r, i) {
+  const it = r.item;
+  const sel = r.key && S.sel.has(r.key);
+  const cls = "row" + (r.key ? "" : " off") + (i === S.cursor ? " cursor" : "");
+  const open = '<li class="' + cls + '" role="option" id="r' + i + '" data-i="' + i + '" aria-selected="' + (sel ? "true" : "false") + '">'
+    + '<span class="check" aria-hidden="true"></span>';
+  if (S.view === "senders") {
+    const w = when(it.latest_date);
+    return open
+      + '<span class="num">' + fmtN(it.count) + "</span>"
+      + '<span class="who">' + addrHtml(r.key) + (it.name ? '<span class="name">' + esc(it.name) + "</span>" : "") + "</span>"
+      + '<span class="subj"><span class="line">' + esc(it.latest_subject || "No subject") + "</span>" + tagsHtml(it) + "</span>"
+      + '<span class="when" title="' + esc(w.full) + '">' + esc(w.short) + "</span></li>";
+  }
+  if (S.view === "mail") {
+    const w = when(it.date);
+    return open
+      + '<span class="who">' + addrHtml(r.key) + (it.from_name ? '<span class="name">' + esc(it.from_name) + "</span>" : "") + "</span>"
+      + '<span class="subj"><span class="line">' + esc(it.subject || "No subject") + "</span>" + tagsHtml(it) + "</span>"
+      + '<span class="when" title="' + esc(w.full) + '">' + esc(w.short) + "</span></li>";
+  }
+  return open + '<span class="who">' + entryHtml(r.key) + "</span><span></span></li>";
+}
+
+function colsHtml() {
+  if (S.view === "senders") {
+    return '<div class="cols" aria-hidden="true"><span></span><span class="num">Mail</span><span>Sender</span><span>Latest subject</span><span class="when">Latest</span></div>';
+  }
+  if (S.view === "mail") {
+    return '<div class="cols" aria-hidden="true"><span></span><span>From</span><span>Subject</span><span class="when">Received</span></div>';
+  }
+  return "";
+}
+
+function emptyHtml() {
+  const hit = S.cache[cacheKey()];
+  if (S.query) {
+    return '<div class="empty"><strong>Nothing matches “' + esc(S.query) + '”</strong>Clear the filter to see everything.</div>';
+  }
+  if (S.view === "senders" || S.view === "mail") {
+    const hidden = hit && hit.data.hidden ? " " + plural(hit.data.hidden, "message") + " from whitelisted senders " + (hit.data.hidden === 1 ? "is" : "are") + " hidden." : "";
+    return '<div class="empty"><strong>No mail in the last ' + plural(S.days, "day") + "</strong>Try a longer window." + esc(hidden) + "</div>";
+  }
+  const hint = {
+    blacklist: "Mail from blacklisted senders goes to Trash. Add one above, or pick senders from the Senders view.",
+    quarantine: "Quarantined mail is labelled and kept out of the inbox, then trashed when it ages out.",
+    whitelist: "Whitelisted senders are never deleted and are hidden from the review views.",
+  }[S.view];
+  return '<div class="empty"><strong>The ' + S.view + " is empty</strong>" + esc(hint) + "</div>";
+}
+
+function render() {
+  const view = S.view;
+  const table = $("table");
+  const all = items();
+  if (!all) {
+    if (!S.loading[cacheKey()]) load();
+    table.innerHTML = '<div class="card"><div class="empty">Loading…</div></div>';
+    renderMeta(null);
     return;
   }
-  toast(
-    (data.dry_run ? "DRY RUN" : "run") + " " + data.run_id + "\n"
-    + "matched " + data.matched + " · trashed " + data.trashed
-    + " · would trash " + data.would_trash
-    + (data.filed ? " · filed " + data.filed : "")
-    + (data.would_file ? " · would file " + data.would_file : "")
-    + (data.expired ? " · expired " + data.expired : "")
-    + (data.would_expire ? " · would expire " + data.would_expire : "")
-    + (data.quarantine_created ? " · created label " + (data.quarantine_folder || data.quarantine_label) : "")
-    + (data.suppressed ? " · suppressed " + data.suppressed : "")
-    + (data.capped ? " · capped" : "")
-    + (data.errors && data.errors.length ? "\n" + data.errors.join("\n") : "")
-    + (data.warnings && data.warnings.length ? "\n" + data.warnings.join("\n") : ""),
-    !!((data.errors && data.errors.length) || (data.warnings && data.warnings.length))
-  );
-}
+  S.rows = all;
+  // Drop selections that are no longer visible, so the tray never acts on hidden rows.
+  const visible = new Set(all.map((r) => r.key));
+  for (const k of [...S.sel]) if (!visible.has(k)) S.sel.delete(k);
+  if (S.cursor >= all.length) S.cursor = all.length - 1;
 
-async function waitForRun(runId) {
-  for (let tries = 0; tries < 900; tries++) {
-    await sleep(2000);
-    try {
-      const data = await api("GET", "/runs/" + encodeURIComponent(runId));
-      await loadStatus();
-      if (data.found) { toastRun(data.run); return; }
-      if (!data.running) {
-        await sleep(1000);
-        const again = await api("GET", "/runs/" + encodeURIComponent(runId));
-        if (again.found) toastRun(again.run);
-        return;
-      }
-    } catch (err) {
-      // Keep polling; a transient failure should not hide a finished run.
-    }
+  const listClass = isReview(view) ? "view-" + view : "view-list";
+  if (!all.length) {
+    table.innerHTML = '<div class="card ' + listClass + '">' + emptyHtml() + "</div>";
+  } else {
+    let html = '<div class="card ' + listClass + '">' + colsHtml()
+      + '<ul class="list" id="list" role="listbox" aria-multiselectable="true" tabindex="0" aria-label="' + esc(TITLES[view]) + '">';
+    for (let i = 0; i < all.length; i++) html += rowHtml(all[i], i);
+    html += "</ul></div>";
+    table.innerHTML = html;
+    const list = $("list");
+    if (S.cursor >= 0) list.setAttribute("aria-activedescendant", "r" + S.cursor);
   }
-  toast("run is still going after 30 minutes; check status later", true);
+  renderMeta(S.cache[cacheKey()].data);
+  renderNotices(S.cache[cacheKey()].data);
+  renderTray();
 }
 
-$("btn-run").addEventListener("click", async () => {
-  state.busy = true;
-  $("btn-run").disabled = true;
-  $("btn-run").textContent = "running…";
+function renderError(message) {
+  $("table").innerHTML = '<div class="card"><div class="empty"><strong>Could not load this view</strong>'
+    + esc(message) + '<br><button class="btn" id="retry">Try again</button></div></div>';
+  $("retry").addEventListener("click", () => load(true));
+  renderMeta(null);
+}
+
+function renderMeta(data) {
+  const meta = $("meta");
+  if (!data) { meta.textContent = ""; return; }
+  const n = S.rows.length;
+  const hidden = data.hidden ? " Mail from whitelisted senders is hidden (" + fmtN(data.hidden) + ")." : "";
+  if (S.view === "senders") {
+    meta.textContent = plural(n, "sender") + " in the last " + plural(S.days, "day") + "." + hidden;
+  } else if (S.view === "mail") {
+    meta.textContent = "Showing " + plural(n, "message") + (data.scanned > n ? " of " + fmtN(data.scanned) : "")
+      + " from the last " + plural(S.days, "day") + "." + hidden;
+  } else {
+    meta.textContent = plural(n, "entry", "entries");
+  }
+}
+
+function renderNotices(data) {
+  const out = [];
+  for (const w of data.warnings || []) out.push("<p>" + esc(w) + "</p>");
+  for (const e of data.errors || []) out.push("<p>Line " + esc(e.line) + " of the file was ignored: " + esc(e.entry) + " (" + esc(e.reason) + ")</p>");
+  let html = out.length ? '<div class="notice">' + out.join("") + "</div>" : "";
+  if (S.view === "quarantine" && data.label) {
+    const held = S.status && S.status.state ? S.status.state.last_held : null;
+    html += '<div class="notice info"><p>New mail from these senders gets the <strong>' + esc(data.label)
+      + "</strong> label and leaves the inbox. It goes to Trash once it is older than " + esc(data.age)
+      + " (received before " + esc(data.cutoff) + ")."
+      + (held != null ? " " + fmtN(held) + " messages are held now." : "") + "</p></div>";
+  }
+  $("notices").innerHTML = html;
+}
+
+function renderTray() {
+  const tray = $("tray");
+  const n = S.sel.size;
+  document.body.classList.toggle("tray-open", n > 0);
+  if (!n) { tray.hidden = true; return; }
+  const wasHidden = tray.hidden;
+  tray.hidden = false;
+  if (wasHidden) { tray.classList.remove("show"); void tray.offsetWidth; tray.classList.add("show"); }
+  $("tray-count").textContent = isReview()
+    ? plural(n, "sender") + " selected"
+    : plural(n, "entry", "entries") + " selected";
+  for (const btn of tray.querySelectorAll("[data-act]")) {
+    const act = btn.dataset.act;
+    if (act === "remove") btn.hidden = isReview();
+    else if (LISTS.includes(act)) btn.hidden = act === S.view;
+    btn.disabled = S.busy && act !== "clear";
+  }
+}
+
+function setCount(list, n) {
+  const el = $("n-" + list);
+  if (el && n != null) el.textContent = fmtN(n);
+}
+
+/* Update only the rows whose selection changed. */
+function paintSelection(keys) {
+  const list = $("list");
+  if (!list) return;
+  for (let i = 0; i < S.rows.length; i++) {
+    const r = S.rows[i];
+    if (keys && !keys.has(r.key)) continue;
+    const el = list.children[i];
+    if (el) el.setAttribute("aria-selected", r.key && S.sel.has(r.key) ? "true" : "false");
+  }
+  renderTray();
+}
+
+function setCursor(i, scroll) {
+  const list = $("list");
+  if (!list || !S.rows.length) return;
+  i = Math.max(0, Math.min(S.rows.length - 1, i));
+  if (S.cursor >= 0 && list.children[S.cursor]) list.children[S.cursor].classList.remove("cursor");
+  S.cursor = i;
+  const el = list.children[i];
+  el.classList.add("cursor");
+  list.setAttribute("aria-activedescendant", el.id);
+  if (scroll) {
+    const r = el.getBoundingClientRect();
+    const top = document.querySelector(".toolbar").getBoundingClientRect().bottom + 8;
+    const bottom = window.innerHeight - ($("tray").hidden ? 16 : 96);
+    if (r.top < top) window.scrollBy(0, r.top - top);
+    else if (r.bottom > bottom) window.scrollBy(0, r.bottom - bottom);
+  }
+}
+
+/* ================================================================
+   Selection
+   ================================================================ */
+function toggleAt(i, range) {
+  const r = S.rows[i];
+  if (!r || !r.key) return;
+  const changed = new Set();
+  if (range && S.anchor >= 0 && S.anchor < S.rows.length) {
+    const on = S.rows[S.anchor].key ? S.sel.has(S.rows[S.anchor].key) : true;
+    const [a, b] = S.anchor < i ? [S.anchor, i] : [i, S.anchor];
+    for (let j = a; j <= b; j++) {
+      const k = S.rows[j].key;
+      if (!k) continue;
+      if (on) S.sel.add(k); else S.sel.delete(k);
+      changed.add(k);
+    }
+  } else {
+    if (S.sel.has(r.key)) S.sel.delete(r.key); else S.sel.add(r.key);
+    changed.add(r.key);
+    S.anchor = i;
+  }
+  paintSelection(changed);
+}
+
+function selectAll() {
+  for (const r of S.rows) if (r.key) S.sel.add(r.key);
+  paintSelection();
+}
+
+function clearSelection() {
+  if (!S.sel.size) return;
+  S.sel.clear();
+  S.anchor = -1;
+  paintSelection();
+}
+
+document.addEventListener("click", (event) => {
+  const row = event.target.closest(".row");
+  if (!row || !$("list") || !$("list").contains(row)) return;
+  const i = Number(row.dataset.i);
+  setCursor(i, false);
+  toggleAt(i, event.shiftKey);
+});
+// Shift-click should select rows, not text.
+document.addEventListener("mousedown", (event) => {
+  if (event.shiftKey && event.target.closest(".row")) event.preventDefault();
+});
+
+/* ================================================================
+   Actions
+   ================================================================ */
+/* Apply a list to the selection (or to typed entries) and update rows in place. */
+async function applyList(target, entries, fromInput) {
+  entries = entries.filter(Boolean);
+  if (!entries.length || S.busy) return;
+  S.busy = true;
+  renderTray();
+  const snapshot = snapshotFlags(entries);
   try {
-    const data = await api("POST", "/run", {});
-    if (data.run_id) {
-      toast("run " + data.run_id + " started");
-      await waitForRun(data.run_id);
-    }
-    await loadStatus();
-    if (state.tab === "mail") loadMail();
-    if (state.tab === "senders") loadSenders();
+    const res = await api("POST", "/" + target, { addresses: entries });
+    const added = res.added || [];
+    const moved = res.removed_from || {};
+    setCount(target, res.count);
+    for (const [name, list] of Object.entries(moved)) adjustListCache(name, list, false);
+    adjustListCache(target, added, true);
+    markRows(target, added.concat(res.skipped || []));
+    if (!isReview()) { S.sel.clear(); }
+    else for (const e of entries) S.sel.delete(e);
+    if (fromInput) $("add-input").value = "";
+    render();
+    refreshCounts();
+
+    const parts = [];
+    if (added.length) parts.push(VERDICT[target].done + " " + (added.length === 1 ? added[0] : plural(added.length, "sender")) + ".");
+    const movedNames = Object.keys(moved);
+    if (movedNames.length) parts.push("Removed from the " + movedNames.join(" and the ") + ".");
+    if ((res.skipped || []).length && !added.length) parts.push("Already on the " + target + ".");
+    for (const e of res.errors || []) parts.push(e.entry + ": " + e.reason);
+    toast(parts.join("\n") || "Nothing changed.", {
+      bad: !added.length && (res.errors || []).length > 0,
+      undo: added.length ? () => undoApply(target, added, moved, snapshot) : null,
+    });
   } catch (err) {
-    toast(err.message, true);
+    toast(err.message, { bad: true });
   } finally {
-    state.busy = false;
-    $("btn-run").disabled = false;
-    $("btn-run").textContent = "Run now";
+    S.busy = false;
+    renderTray();
   }
+}
+
+async function undoApply(target, added, moved, snapshot) {
+  try {
+    await api("POST", "/" + target + "/remove", { addresses: added });
+    adjustListCache(target, added, false);
+    for (const [name, list] of Object.entries(moved)) {
+      await api("POST", "/" + name, { addresses: list });
+      adjustListCache(name, list, true);
+    }
+    restoreFlags(snapshot);
+    render();
+    refreshCounts();
+    toast("Undone.");
+  } catch (err) {
+    toast("Could not undo: " + err.message, { bad: true });
+  }
+}
+
+async function removeSelected() {
+  const view = S.view;
+  const entries = [...S.sel];
+  if (!entries.length || isReview() || S.busy) return;
+  S.busy = true;
+  renderTray();
+  try {
+    const res = await api("POST", "/" + view + "/remove", { addresses: entries });
+    const removed = res.removed || [];
+    adjustListCache(view, removed, false);
+    unmarkRows(view, removed);
+    S.sel.clear();
+    render();
+    refreshCounts();
+    toast("Removed " + (removed.length === 1 ? removed[0] : plural(removed.length, "entry", "entries")) + " from the " + view + ".", {
+      undo: removed.length ? async () => {
+        try {
+          await api("POST", "/" + view, { addresses: removed });
+          adjustListCache(view, removed, true);
+          markRows(view, removed);
+          render();
+          refreshCounts();
+          toast("Undone.");
+        } catch (err) { toast("Could not undo: " + err.message, { bad: true }); }
+      } : null,
+    });
+  } catch (err) {
+    toast(err.message, { bad: true });
+  } finally {
+    S.busy = false;
+    renderTray();
+  }
+}
+
+/* Keep cached list views in step without refetching. */
+function adjustListCache(list, entries, add) {
+  const hit = S.cache[list];
+  if (!hit || !entries.length) return;
+  const set = new Set(hit.data.entries);
+  for (const e of entries) add ? set.add(e) : set.delete(e);
+  hit.data.entries = [...set];
+  hit.data.count = hit.data.entries.length;
+  setCount(list, hit.data.count);
+}
+
+/* Review rows carry the list flags; mirror what the server now has. */
+function reviewItems() {
+  const out = [];
+  for (const [key, hit] of Object.entries(S.cache)) {
+    if (key.startsWith("senders:")) out.push(...(hit.data.senders || []).map((s) => [s, s.address]));
+    if (key.startsWith("mail:")) out.push(...(hit.data.messages || []).map((m) => [m, m.from_addr]));
+  }
+  return out;
+}
+
+function covers(entry, addr) {
+  if (!addr) return false;
+  return entry.startsWith("@") ? addr.endsWith(entry) : addr === entry;
+}
+
+function markRows(list, entries) {
+  for (const [item, addr] of reviewItems()) {
+    const hit = entries.find((e) => covers(e, addr));
+    if (!hit) continue;
+    // Adding moves the exact entry out of the other lists.
+    if (item.blacklisted === hit) item.blacklisted = null;
+    if (item.quarantined === hit) item.quarantined = null;
+    if (list === "blacklist") item.blacklisted = hit;
+    if (list === "quarantine") item.quarantined = hit;
+    if (list === "whitelist") item._hidden = true;
+  }
+}
+
+function unmarkRows(list, entries) {
+  for (const [item] of reviewItems()) {
+    if (list === "blacklist" && entries.includes(item.blacklisted)) item.blacklisted = null;
+    if (list === "quarantine" && entries.includes(item.quarantined)) item.quarantined = null;
+  }
+  if (list === "whitelist") {
+    // Unhiding needs fresh rows: whitelisted mail was never sent to the page.
+    for (const key of Object.keys(S.cache)) if (key.startsWith("senders:") || key.startsWith("mail:")) delete S.cache[key];
+  }
+}
+
+function snapshotFlags(entries) {
+  const snap = [];
+  for (const [item, addr] of reviewItems()) {
+    if (entries.some((e) => covers(e, addr))) snap.push([item, item.blacklisted, item.quarantined, item._hidden]);
+  }
+  return snap;
+}
+
+function restoreFlags(snap) {
+  for (const [item, b, q, h] of snap) { item.blacklisted = b; item.quarantined = q; item._hidden = h; }
+}
+
+async function refreshCounts() {
+  try {
+    const st = await api("GET", "/status");
+    applyStatus(st);
+  } catch (e) { /* the next poll will catch up */ }
+}
+
+$("tray").addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-act]");
+  if (!btn || btn.disabled) return;
+  const act = btn.dataset.act;
+  if (act === "clear") clearSelection();
+  else if (act === "remove") removeSelected();
+  else applyList(act, [...S.sel]);
 });
 
-const debouncedMail = debounce(() => loadMail(), 400);
-const debouncedSenders = debounce(() => loadSenders(), 400);
-
-$("btn-refresh").addEventListener("click", () => refresh(true));
-$("days").addEventListener("change", debouncedMail);
-$("limit").addEventListener("change", debouncedMail);
-$("folder").addEventListener("change", () => loadMail());
-$("sdays").addEventListener("change", debouncedSenders);
-
-$("check-all-mail").addEventListener("change", (event) => {
-  const checked = event.target.checked;
-  for (const box of $("mail-body").querySelectorAll("input[type=checkbox]:not(:disabled)")) {
-    box.checked = checked;
-    const address = box.dataset.address;
-    if (!address) continue;
-    if (checked) state.selectedMail.add(address);
-    else state.selectedMail.delete(address);
-  }
-  updateMailButton();
-});
-$("check-all-senders").addEventListener("change", (event) => {
-  const checked = event.target.checked;
-  for (const box of $("senders-body").querySelectorAll("input[type=checkbox]:not(:disabled)")) {
-    box.checked = checked;
-    const address = box.dataset.address;
-    if (!address) continue;
-    if (checked) state.selectedSenders.add(address);
-    else state.selectedSenders.delete(address);
-  }
-  updateSendersButton();
+function addFromInput() {
+  const raw = $("add-input").value.trim();
+  if (!raw) { $("add-input").focus(); return; }
+  applyList(S.view, raw.split(/[\s,;]+/), true);
+}
+$("add-btn").addEventListener("click", addFromInput);
+$("add-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); addFromInput(); }
 });
 
-/* ---------- boot ---------- */
-function refresh(force) {
-  loadStatus().catch((err) => toast(err.message, true));
-  if (state.tab === "mail") loadMail(force);
-  if (state.tab === "senders") loadSenders(force);
-  if (state.tab === "blacklist") loadBlacklist();
-  if (state.tab === "whitelist") loadWhitelist();
-  if (state.tab === "quarantine") loadQuarantine();
+/* ================================================================
+   Toasts
+   ================================================================ */
+function toast(message, opts = {}) {
+  const box = document.createElement("div");
+  box.className = "toast" + (opts.bad ? " bad" : "");
+  box.setAttribute("role", opts.bad ? "alert" : "status");
+  const p = document.createElement("p");
+  p.textContent = message;
+  box.append(p);
+  let timer;
+  const close = () => { clearTimeout(timer); box.remove(); };
+  if (opts.undo) {
+    const undo = document.createElement("button");
+    undo.textContent = "Undo";
+    undo.addEventListener("click", () => { close(); opts.undo(); });
+    box.append(undo);
+  }
+  const x = document.createElement("button");
+  x.className = "x";
+  x.setAttribute("aria-label", "Dismiss");
+  x.textContent = "×";
+  x.addEventListener("click", close);
+  box.append(x);
+  const host = $("toasts");
+  host.append(box);
+  while (host.children.length > 4) host.firstChild.remove();
+  timer = setTimeout(close, opts.undo ? 10000 : opts.bad ? 9000 : 5000);
+  box.addEventListener("mouseenter", () => clearTimeout(timer));
+  box.addEventListener("mouseleave", () => { timer = setTimeout(close, 4000); });
+}
+
+/* ================================================================
+   Status and runs
+   ================================================================ */
+const PHASES = { expire: "expiring held mail", file: "filing into quarantine", purge: "trashing blacklisted mail" };
+
+function applyStatus(st) {
+  S.status = st;
+  const s = st.state || {};
+  setCount("blacklist", st.blacklist_entries);
+  setCount("quarantine", st.quarantine_entries);
+  setCount("whitelist", st.whitelist_entries);
+
+  const mode = $("mode");
+  mode.hidden = false;
+  mode.className = "mode " + (st.dry_run ? "dry" : "live");
+  mode.textContent = st.dry_run ? "Dry run" : "Live";
+  mode.title = st.dry_run ? "Nothing is deleted; runs only report what they would do." : "Runs move mail to Trash.";
+
+  const dot = $("status-dot");
+  const text = $("status-text");
+  if (st.running) {
+    dot.className = "dot busy";
+    text.textContent = "Running" + (s.running_phase ? ": " + (PHASES[s.running_phase] || s.running_phase) : "");
+  } else if (s.last_ok === false) {
+    dot.className = "dot bad";
+    text.textContent = "Last run failed " + ago(s.last_run);
+  } else {
+    dot.className = "dot";
+    text.textContent = s.last_run ? "Last run " + ago(s.last_run) : "No runs yet";
+  }
+
+  const run = $("run");
+  run.disabled = !!st.running;
+  run.textContent = st.running ? "Running…" : "Run now";
+
+  const rc = s.running_counts;
+  const cmds = s.last_imap_commands ? Object.values(s.last_imap_commands).reduce((a, b) => a + b, 0) : null;
+  const rows = st.running && rc
+    ? [["Trashed so far", rc.trashed], ["Filed so far", rc.filed], ["Expired so far", rc.expired]]
+    : [
+        ["Trashed", s.last_dry_run ? s.last_would_trash : s.last_trashed],
+        ["Filed to quarantine", s.last_dry_run ? s.last_would_file : s.last_filed],
+        ["Expired from quarantine", s.last_dry_run ? s.last_would_expire : s.last_expired],
+        ["Held in quarantine", s.last_held],
+        ["Took", s.last_duration_s != null ? s.last_duration_s + " s" : null],
+        ["Gmail commands", cmds],
+      ];
+  let html = "<h3>" + (st.running ? "Run in progress" : s.last_run ? "Last run, " + esc(ago(s.last_run)) : "No runs yet") + "</h3><dl>";
+  for (const [k, v] of rows) html += "<dt>" + esc(k) + "</dt><dd>" + (typeof v === "number" ? fmtN(v) : esc(v == null ? "–" : v)) + "</dd>";
+  html += "</dl>";
+  if (!st.running && s.last_dry_run) html += '<p class="sub">That was a dry run: the numbers are what it would have done.</p>';
+  if (!st.running && s.last_capped) html += '<p class="sub">It reached a per-run limit; the rest is handled by the next run.</p>';
+  if (s.last_error) html += '<p class="err">' + esc(s.last_error) + "</p>";
+  html += '<p class="sub">Watching the inbox: ' + esc(s.watcher || st.mode) + ". Full sweep every hour.</p>";
+  $("status-panel").innerHTML = html;
+}
+
+async function pollStatus() {
+  try { applyStatus(await api("GET", "/status")); } catch (e) { /* shown on next action */ }
 }
 
 let statusTimer = null;
-function startStatusPolling() {
-  if (statusTimer) return;
-  statusTimer = setInterval(() => loadStatus().catch(() => {}), 15000);
-}
-function stopStatusPolling() {
-  if (!statusTimer) return;
-  clearInterval(statusTimer);
-  statusTimer = null;
+function schedulePoll() {
+  clearTimeout(statusTimer);
+  if (document.hidden) return;
+  const fast = (S.status && S.status.running) || S.runId;
+  statusTimer = setTimeout(async () => { await pollStatus(); schedulePoll(); }, fast ? 2000 : 15000);
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) stopStatusPolling();
-  else { loadStatus().catch(() => {}); startStatusPolling(); }
+  if (!document.hidden) { pollStatus(); schedulePoll(); }
 });
 
-if (!token()) openTokenDialog();
-refresh(false);
-startStatusPolling();
+$("run").addEventListener("click", async () => {
+  const run = $("run");
+  run.disabled = true;
+  run.textContent = "Starting…";
+  try {
+    const res = await api("POST", "/run", {});
+    S.runId = res.run_id;
+    await pollStatus();
+    schedulePoll();
+    watchRun(res.run_id);
+  } catch (err) {
+    toast(err.status === 409 ? "A run is already in progress. Wait for it to finish." : err.message, { bad: err.status !== 409 });
+    pollStatus();
+  }
+});
+
+async function watchRun(id) {
+  for (let i = 0; i < 900 && S.runId === id; i++) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let res;
+    try { res = await api("GET", "/runs/" + encodeURIComponent(id)); } catch (e) { continue; }
+    if (!res.found) continue;
+    S.runId = null;
+    const r = res.run;
+    if (r.skipped) { toast("Run skipped: " + r.skipped, { bad: true }); break; }
+    const dry = r.dry_run;
+    const bits = [
+      [dry ? r.would_trash : r.trashed, dry ? "would be trashed" : "trashed"],
+      [dry ? r.would_file : r.filed, dry ? "would be filed" : "filed to quarantine"],
+      [dry ? r.would_expire : r.expired, dry ? "would expire" : "expired"],
+    ].filter(([n]) => n).map(([n, label]) => fmtN(n) + " " + label);
+    let msg = (dry ? "Dry run finished" : "Run finished") + " in " + r.duration_s + " s. "
+      + (bits.length ? bits.join(", ") + "." : "Nothing to do.");
+    if (r.capped) msg += "\nIt reached a per-run limit; the next run continues.";
+    const errs = r.errors || [];
+    if (errs.length) msg += "\n" + errs.join("\n");
+    toast(msg, { bad: !r.ok || errs.length > 0 });
+    // A live run that changed mail makes the review views stale.
+    if (!dry && (r.trashed || r.filed || r.expired)) {
+      for (const key of Object.keys(S.cache)) if (key.startsWith("senders:") || key.startsWith("mail:")) delete S.cache[key];
+      if (isReview()) render();
+    }
+    break;
+  }
+  pollStatus();
+  schedulePoll();
+}
+
+/* ================================================================
+   Navigation and controls
+   ================================================================ */
+function setView(view) {
+  if (!TITLES[view]) return;
+  if (view !== S.view) {
+    S.sel.clear(); S.anchor = -1; S.cursor = -1;
+    S.query = ""; $("search").value = "";
+  }
+  S.view = view;
+  savePrefs();
+  for (const b of document.querySelectorAll(".nav-item")) {
+    if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  }
+  document.title = TITLES[view] + " – Gmail Spam Assassin";
+  $("title").textContent = TITLES[view];
+  $("days").hidden = !isReview();
+  $("folder").hidden = view !== "mail";
+  $("refresh").hidden = !isReview();
+  $("add-row").hidden = isReview();
+  $("search").placeholder = isReview() ? "Filter by sender or subject" : "Filter entries";
+  if (!isReview()) {
+    const btn = $("add-btn");
+    btn.className = "verdict " + VERDICT[view].tone;
+    btn.textContent = "Add to " + view;
+    $("add-input").placeholder = PLACEHOLDER[view];
+  }
+  $("notices").innerHTML = "";
+  render();
+  load();
+}
+
+function syncSeg() {
+  for (const b of $("days").querySelectorAll("button")) b.setAttribute("aria-pressed", String(Number(b.dataset.days) === S.days));
+  for (const b of $("folder").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.folder === S.folder));
+}
+
+for (const b of document.querySelectorAll(".nav-item")) b.addEventListener("click", () => setView(b.dataset.view));
+$("days").addEventListener("click", (event) => {
+  const b = event.target.closest("button");
+  if (!b) return;
+  S.days = Number(b.dataset.days);
+  savePrefs(); syncSeg(); S.cursor = -1; render();
+});
+$("folder").addEventListener("click", (event) => {
+  const b = event.target.closest("button");
+  if (!b) return;
+  S.folder = b.dataset.folder;
+  savePrefs(); syncSeg(); S.cursor = -1; render();
+});
+$("refresh").addEventListener("click", () => load(true));
+
+let searchTimer;
+$("search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { S.query = $("search").value; S.cursor = -1; render(); }, 60);
+});
+
+/* ================================================================
+   Keyboard
+   ================================================================ */
+document.addEventListener("keydown", (event) => {
+  const typing = event.target instanceof Element && event.target.matches("input, textarea, select");
+  if ($("token-dialog").open) return;
+  if (event.key === "Escape") {
+    if (typing) { event.target.blur(); if (event.target.id === "search" && event.target.value) { event.target.value = ""; S.query = ""; render(); } return; }
+    if ($("status").open) { $("status").open = false; return; }
+    clearSelection();
+    return;
+  }
+  if (typing || event.altKey) return;
+  const mod = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+  if (mod && key === "a") { event.preventDefault(); selectAll(); return; }
+  if (mod) return;
+  const list = $("list");
+  switch (key) {
+    case "j": case "arrowdown":
+      event.preventDefault();
+      setCursor(S.cursor + 1, true);
+      if (event.shiftKey) toggleAt(S.cursor, false);
+      list && list.focus({ preventScroll: true });
+      break;
+    case "k": case "arrowup":
+      event.preventDefault();
+      setCursor(S.cursor - 1, true);
+      if (event.shiftKey) toggleAt(S.cursor, false);
+      list && list.focus({ preventScroll: true });
+      break;
+    case "x": case " ":
+      if (S.cursor >= 0) { event.preventDefault(); toggleAt(S.cursor, false); }
+      break;
+    case "/":
+      event.preventDefault();
+      $("search").focus();
+      break;
+    case "r":
+      load(true);
+      break;
+    case "b": if (S.sel.size && S.view !== "blacklist") applyList("blacklist", [...S.sel]); break;
+    case "q": if (S.sel.size && S.view !== "quarantine") applyList("quarantine", [...S.sel]); break;
+    case "w": if (S.sel.size && S.view !== "whitelist") applyList("whitelist", [...S.sel]); break;
+    case "delete": case "backspace":
+      if (!isReview() && S.sel.size) { event.preventDefault(); removeSelected(); }
+      break;
+  }
+});
+
+/* ================================================================
+   Token
+   ================================================================ */
+function openToken() {
+  const dialog = $("token-dialog");
+  if (dialog.open) return;
+  $("token-input").value = token();
+  dialog.showModal();
+  $("token-input").focus();
+}
+$("token").addEventListener("click", openToken);
+$("token-save").addEventListener("click", () => {
+  localStorage.setItem(TOKEN_KEY, $("token-input").value.trim());
+  $("token-dialog").close();
+  S.cache = {};
+  boot();
+});
+$("token-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); $("token-save").click(); }
+});
+$("token-forget").addEventListener("click", () => {
+  localStorage.removeItem(TOKEN_KEY);
+  $("token-input").value = "";
+  toast("Token forgotten in this browser.");
+});
+
+/* ================================================================
+   Boot
+   ================================================================ */
+function boot() {
+  syncSeg();
+  setView(S.view);
+  pollStatus().then(schedulePoll);
+  // Warm the list counts and the other review view in the background.
+  for (const list of LISTS) if (list !== S.view) {
+    api("GET", "/" + list).then((data) => { S.cache[list] = { at: Date.now(), data }; setCount(list, data.count); }).catch(() => {});
+  }
+}
+
+// Without a token the first request answers 401, which opens the token dialog.
+boot();
 </script>
 </body>
 </html>
