@@ -119,12 +119,16 @@ def tail_jsonl(path, limit):
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
             position = handle.tell()
-            data = b""
-            while position > 0 and data.count(b"\n") < limit + 1:
+            chunks = []
+            newlines = 0
+            while position > 0 and newlines < limit + 1:
                 step = min(8192, position)
                 position -= step
                 handle.seek(position)
-                data = handle.read(step) + data
+                chunk = handle.read(step)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+            data = b"".join(reversed(chunks))
     except OSError:
         return []
     text = data.decode("utf-8", "replace")

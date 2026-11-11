@@ -669,39 +669,19 @@ async function waitForRun(runId) {
   toast("run is still going after 30 minutes; check status later", true);
 }
 
-async function waitForBusyToFinish() {
-  for (let tries = 0; tries < 900; tries++) {
-    await sleep(2000);
-    const status = await loadStatus();
-    if (!status.running) {
-      const runId = (status.state || {}).last_run_id;
-      if (runId) {
-        try {
-          const data = await api("GET", "/runs/" + encodeURIComponent(runId));
-          if (data.found) toastRun(data.run);
-        } catch (err) { /* ignore */ }
-      }
-      return;
-    }
-  }
-}
-
 $("btn-run").addEventListener("click", async () => {
   state.busy = true;
   $("btn-run").disabled = true;
   $("btn-run").textContent = "running…";
   try {
     const data = await api("POST", "/run", {});
-    if (data.queued) {
-      toast("a run is already in progress; another will follow");
-      await waitForBusyToFinish();
-    } else if (data.run_id) {
+    if (data.run_id) {
       toast("run " + data.run_id + " started");
       await waitForRun(data.run_id);
     }
     await loadStatus();
-    if (state.tab === "mail") loadMail(true);
-    if (state.tab === "senders") loadSenders(true);
+    if (state.tab === "mail") loadMail();
+    if (state.tab === "senders") loadSenders();
   } catch (err) {
     toast(err.message, true);
   } finally {
@@ -717,7 +697,7 @@ const debouncedSenders = debounce(() => loadSenders(), 400);
 $("btn-refresh").addEventListener("click", () => refresh(true));
 $("days").addEventListener("change", debouncedMail);
 $("limit").addEventListener("change", debouncedMail);
-$("folder").addEventListener("change", debouncedMail);
+$("folder").addEventListener("change", () => loadMail());
 $("sdays").addEventListener("change", debouncedSenders);
 
 $("check-all-mail").addEventListener("change", (event) => {

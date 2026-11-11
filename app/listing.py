@@ -13,6 +13,7 @@ or on an explicit Refresh. The shared read-only connection and per-key
 single-flight keep parallel browser requests from opening duplicate sessions.
 """
 
+import imaplib
 import threading
 import time
 
@@ -23,16 +24,26 @@ RAW_LIMIT = 1000
 
 _cache = {}
 _inflight = {}
+_generation = 0
 _lock = threading.Lock()
 
 _conn = None
 _conn_key = None
+_conn_last_used = 0.0
 _conn_lock = threading.RLock()
 
 
 def invalidate():
+    """Drop cached rows but keep the connection; rows are cheap to rebuild."""
+    global _generation
     with _lock:
         _cache.clear()
+        _generation += 1
+
+
+def reset():
+    """Full reset for tests and error paths: clear the cache and connection."""
+    invalidate()
     _drop_connection()
 
 
@@ -48,12 +59,15 @@ def _drop_connection():
         _conn_key = None
 
 
-def _with_connection(cfg, work):
-    """Run `work(conn)` on one shared, read-only listing connection."""
-    global _conn, _conn_key
+def _work_once(cfg, work, retry):
+    global _conn, _conn_key, _conn_last_used
     key = (cfg.gmail_user, cfg.gmail_password)
     with _conn_lock:
-        if _conn is None or _conn_key != key:
+        if (
+            _conn is None
+            or _conn_key != key
+            or time.monotonic() - _conn_last_used > 600
+        ):
             if _conn is not None:
                 try:
                     imap.logout(_conn)
@@ -62,19 +76,28 @@ def _with_connection(cfg, work):
             _conn = imap.connect(cfg.gmail_user, cfg.gmail_password)
             _conn_key = key
         try:
-            return work(_conn)
-        except Exception:
+            value = work(_conn)
+            _conn_last_used = time.monotonic()
+            return value
+        except (imaplib.IMAP4.abort, OSError):
             try:
                 imap.logout(_conn)
             except Exception:
                 pass
             _conn = None
             _conn_key = None
-            raise
+            if not retry:
+                raise
+            return _work_once(cfg, work, retry=False)
+
+
+def _with_connection(cfg, work):
+    return _work_once(cfg, work, retry=True)
 
 
 def _cached(key, producer):
-    """Per-key single-flight: one producer, all concurrent callers wait."""
+    """Per-key single-flight, generation-safe against concurrent invalidation."""
+    global _generation
     while True:
         with _lock:
             hit = _cache.get(key)
@@ -85,11 +108,13 @@ def _cached(key, producer):
             if leader:
                 event = threading.Event()
                 _inflight[key] = event
+                generation = _generation
         if leader:
             try:
                 value = producer()
                 with _lock:
-                    _cache[key] = (time.monotonic() + TTL, value)
+                    if generation == _generation:
+                        _cache[key] = (time.monotonic() + TTL, value)
                 return value
             finally:
                 with _lock:

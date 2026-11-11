@@ -14,6 +14,7 @@ Quarantine never uses \\Deleted/EXPUNGE. Filing is an X-GM-LABELS edit, and
 expiry is the same COPY into [Gmail]/Trash that the blacklist uses.
 """
 
+import collections
 import threading
 import time
 import uuid
@@ -46,11 +47,22 @@ FILE_CEILING = 2000
 
 _run_lock = threading.Lock()
 _rerun = threading.Event()
+_recent_runs = collections.deque(maxlen=50)
+_recent_lock = threading.Lock()
 
 
 def request_rerun():
     """A trigger arrived while a run was busy; ask for one more run."""
     _rerun.set()
+
+
+def get_run(run_id):
+    """Recent run summary from memory, so /runs does not read the audit file."""
+    with _recent_lock:
+        for record in reversed(_recent_runs):
+            if record.get("run_id") == run_id:
+                return record
+    return None
 
 
 def busy():
@@ -276,6 +288,10 @@ def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
     if summary.get("incremental"):
         # An incremental run does not scan the label; keep the last full count.
         summary["held"] = state.read_state(cfg.state_path).get("last_held", 0)
+    extra = {}
+    for key in ("quarantine_batch_offset", "blacklist_batch_offset"):
+        if key in summary:
+            extra[key] = summary[key]
     try:
         state.append_audit(cfg.audit_path, dict(summary, kind="summary"))
         state.update_state(
@@ -305,6 +321,7 @@ def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
             running_phase=None,
             running_counts=None,
             heartbeat=state.now_iso(),
+            **extra,
         )
         if not dry and (
             summary["trashed"] or summary["filed"] or summary["expired"]
@@ -315,16 +332,20 @@ def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
                 listing.invalidate()
             except Exception:
                 pass
+        with _recent_lock:
+            _recent_runs.append(dict(summary))
     except Exception:
         pass
 
 
 def run_purge(cfg, dry_run=None, reason="manual", run_id=None):
-    """Run once, plus one coalesced rerun if a trigger arrived while busy."""
+    """Run once, plus one coalesced rerun at the configured mode."""
     result = _run_once(cfg, dry_run=dry_run, reason=reason, run_id=run_id)
     if _rerun.is_set():
         _rerun.clear()
-        result = _run_once(cfg, dry_run=dry_run, reason=reason + "-rerun", run_id=None)
+        # A trigger that arrived during the run is not the caller's explicit
+        # request: rerun in the configured mode, not the caller's override.
+        result = _run_once(cfg, dry_run=None, reason=reason + "-rerun", run_id=None)
     return result
 
 
@@ -450,6 +471,10 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
             elif q_label:
                 summary["quarantine_folder"] = q_label
 
+        prior = state.read_state(cfg.state_path)
+        q_offset = int(prior.get("quarantine_batch_offset") or 0)
+        b_offset = int(prior.get("blacklist_batch_offset") or 0)
+
         if q_entries and q_label:
             phase_started = time.monotonic()
             _progress(cfg, summary, "expire")
@@ -460,7 +485,7 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
 
             phase_started = time.monotonic()
             _progress(cfg, summary, "file")
-            _quarantine_file(
+            q_offset = _quarantine_file(
                 conn,
                 cfg,
                 q_entries,
@@ -472,14 +497,16 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
                 summary,
                 run_id,
                 now,
+                q_offset,
             )
+            summary["quarantine_batch_offset"] = q_offset
             summary["phase_s"]["file"] = round(time.monotonic() - phase_started, 2)
 
         active = [entry for entry in entries if entry not in skipped]
         if active:
             phase_started = time.monotonic()
             _progress(cfg, summary, "purge")
-            _purge_batches(
+            b_offset = _purge_batches(
                 conn,
                 cfg,
                 active,
@@ -490,7 +517,9 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
                 dry,
                 summary,
                 run_id,
+                b_offset,
             )
+            summary["blacklist_batch_offset"] = b_offset
             summary["phase_s"]["purge"] = round(time.monotonic() - phase_started, 2)
         _progress(cfg, summary, None)
         summary["ok"] = True
@@ -559,7 +588,7 @@ def run_new_mail(cfg, since_uid, uidvalidity, dry_run=None, reason="idle"):
 
         imap.select(conn, imap.INBOX, readonly=True)
         summary["uidvalidity"] = conn.uidvalidity
-        summary["uidnext"] = conn.uidnext
+        summary["server_uidnext"] = conn.uidnext
         if (
             uidvalidity is not None
             and conn.uidvalidity is not None
@@ -860,21 +889,42 @@ def _quarantine_expire(
 
 
 def _quarantine_file(
-    conn, cfg, q_entries, hidden, label, all_mail, trash, dry, summary, run_id, now
+    conn,
+    cfg,
+    q_entries,
+    hidden,
+    label,
+    all_mail,
+    trash,
+    dry,
+    summary,
+    run_id,
+    now,
+    offset=0,
 ):
     """Label recent mail, and send already-old matches straight to Trash.
 
     Searches are batched and split by age, so Gmail does the filtering:
     older_than/newer_than plus -label mean only actionable messages come back.
+    Batches start at a rotating offset so an early sender cannot starve later
+    ones without adding any work to a run.
     """
     seen = set()
     age = cfg.quarantine_age
+    batches = list(_chunks(q_entries, SEARCH_BATCH))
+    if not batches:
+        return 0
+    offset = max(0, int(offset)) % len(batches)
+    ordered = batches[offset:] + batches[:offset]
+    stop_index = None
     streams = (
         ("older_than:%s" % age.gmail, True),
         ("newer_than:%s" % age.gmail, False),
     )
-    for batch in _chunks(q_entries, SEARCH_BATCH):
+    for index, batch in enumerate(ordered):
         if _file_budget(summary) <= 0 and _delete_budget(cfg, summary) <= 0:
+            if stop_index is None:
+                stop_index = index
             summary["capped"] = True
             break
         batch_files = []
@@ -1010,10 +1060,18 @@ def _quarantine_file(
                     "quarantine expiry in %s: %s" % (all_mail, exc)
                 )
 
+        if stop_index is None and (
+            _file_budget(summary) <= 0 or _delete_budget(cfg, summary) <= 0
+        ):
+            stop_index = index
         _progress(cfg, summary, "file")
 
     if not dry:
         _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary)
+
+    if stop_index is None:
+        return 0
+    return (offset + stop_index + 1) % len(batches)
 
 
 def _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary):
@@ -1056,18 +1114,41 @@ def _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary):
 
 
 def _purge_batches(
-    conn, cfg, entries, q_entries, hidden, mailboxes, trash, dry, summary, run_id
+    conn,
+    cfg,
+    entries,
+    q_entries,
+    hidden,
+    mailboxes,
+    trash,
+    dry,
+    summary,
+    run_id,
+    offset=0,
 ):
-    """Delete blacklisted mail in batches of senders, not one sender at a time."""
+    """Delete blacklisted mail in batches of senders, not one sender at a time.
+
+    The starting batch rotates so an early sender cannot starve later ones.
+    """
     seen = set()
-    for batch in _chunks(entries, SEARCH_BATCH):
+    batches = list(_chunks(entries, SEARCH_BATCH))
+    if not batches:
+        return 0
+    offset = max(0, int(offset)) % len(batches)
+    ordered = batches[offset:] + batches[:offset]
+    stop_index = None
+    for index, batch in enumerate(ordered):
         if _trash_budget(cfg, summary) <= 0:
             summary["capped"] = True
+            if stop_index is None:
+                stop_index = index
             break
+        stopped = False
         for mailbox in mailboxes:
             remaining = _trash_budget(cfg, summary)
             if remaining <= 0:
                 summary["capped"] = True
+                stopped = True
                 break
             uids, error = _search_batch(conn, mailbox, batch)
             if error:
@@ -1141,3 +1222,12 @@ def _purge_batches(
             except imap.ImapError as exc:
                 summary["errors"].append("trash in %s: %s" % (mailbox, exc))
             _progress(cfg, summary, "purge")
+
+        if stopped or _trash_budget(cfg, summary) <= 0:
+            if stop_index is None:
+                stop_index = index
+            break
+
+    if stop_index is None:
+        return 0
+    return (offset + stop_index + 1) % len(batches)

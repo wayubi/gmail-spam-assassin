@@ -204,16 +204,6 @@ def wait_for_run(run_id, timeout=1800):
     fail({"error": "run %s did not finish within %ss" % (run_id, timeout)})
 
 
-def wait_for_idle(timeout=1800):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        data = request("GET", "/status", timeout=30)
-        if not data.get("running"):
-            return data
-        time.sleep(2)
-    fail({"error": "a run is still in progress after %ss" % timeout})
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="spam-assassin", description=__doc__)
     parser.add_argument("--json", action="store_true", help="print raw JSON")
@@ -335,11 +325,7 @@ def main(argv=None):
         data = request("POST", "/run", body)
         if args.no_wait:
             return print(json.dumps(data, indent=2))
-        if data.get("queued"):
-            status = wait_for_idle()
-            run_id = (status.get("state") or {}).get("last_run_id")
-            data = wait_for_run(run_id) if run_id else None
-        elif data.get("run_id"):
+        if data.get("run_id"):
             data = wait_for_run(data["run_id"])
         return print(json.dumps(data, indent=2)) if args.json else show_run(data)
     if args.command == "audit":

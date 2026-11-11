@@ -341,9 +341,8 @@ class Handler(BaseHTTPRequestHandler):
         if dry is not None:
             dry = bool(dry)
         if runner.busy():
-            runner.request_rerun()
             return self._json(
-                202, {"accepted": True, "queued": True, "running": True}
+                409, {"error": "a run is already in progress", "running": True}
             )
         run_id = uuid.uuid4().hex[:12]
         cfg = self.cfg
@@ -362,6 +361,13 @@ class Handler(BaseHTTPRequestHandler):
     def _run_status(self, run_id, head_only):
         if not run_id:
             return self._json(400, {"error": "no run id"}, head_only)
+        record = runner.get_run(run_id)
+        if record is not None:
+            return self._json(
+                200,
+                {"found": True, "running": runner.busy(), "run": record},
+                head_only,
+            )
         for record in reversed(state.tail_jsonl(self.cfg.audit_path, 5000)):
             if record.get("kind") == "summary" and record.get("run_id") == run_id:
                 return self._json(

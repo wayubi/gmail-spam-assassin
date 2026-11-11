@@ -274,7 +274,7 @@ curl -s -H "$H" "$B/audit?limit=20" | jq -r '.lines[] | [.ts,.action,.from,.subj
 | `POST /quarantine` | add to the hold-then-delete list |
 | `POST /quarantine/remove` | `{"addresses": [...]}` |
 | `DELETE /quarantine/<address>` | remove one (URL-encoded) |
-| `POST /run` | `{"dry_run": true\|false}`, defaults to `DRY_RUN`; returns `202` with a `run_id` immediately |
+| `POST /run` | `{"dry_run": true\|false}`, defaults to `DRY_RUN`; returns `202` with a `run_id` immediately, or `409` if another run is in progress |
 | `GET /runs/<run_id>` | `{"found": true, "run": {...}}` once the run summary exists |
 | `GET /audit?limit=` | recent audit records |
 
@@ -403,6 +403,12 @@ Compose merges automatically.
 | `QUARANTINE_AGE` | `14d` | hold period: `14d`, `3m`, `1y` |
 | `QUARANTINE_ABORT_OVER` | `0` | refuse to expire more than N in one run; 0 disables |
 | `TZ` | `UTC` | container timezone (affects log timestamps only) |
+
+`MAX_DELETE_PER_RUN` and `MAX_TRASH_PER_RUN` are independent: a full run can
+delete at most 500 quarantine messages plus 200 blacklist messages. This is
+intentional — it prevents a quarantine backlog from starving the blacklist —
+but it means the old single total of 500 no longer applies. Lower either cap if
+you want a tighter total.
 
 ### IDLE vs poll
 

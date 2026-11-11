@@ -60,9 +60,39 @@ def _worker(cfg, stop):
         _poll_loop(cfg, stop)
 
 
+def _uid_reconnect_state(last_uidnext, last_uidvalidity, new_uidnext, new_uidvalidity):
+    """Decide the UID state after an IDLE (re)connect.
+
+    A reconnect must not reset the cursor to the server's current UIDNEXT:
+    mail that arrived while the watcher was down would be skipped until the
+    hourly sweep. Only the first connect initialises it, or a UIDVALIDITY
+    change resets it (and asks for a full sweep).
+    """
+    if new_uidnext is None:
+        return last_uidnext, last_uidvalidity, False
+    if last_uidnext is None or last_uidvalidity is None:
+        return new_uidnext, new_uidvalidity, False
+    if (
+        new_uidvalidity is not None
+        and last_uidvalidity is not None
+        and new_uidvalidity != last_uidvalidity
+    ):
+        return new_uidnext, new_uidvalidity, True
+    return last_uidnext, last_uidvalidity, False
+
+
+def _next_uidnext(result, current):
+    """Advance only when a run succeeded and actually processed mail."""
+    if result.get("ok") and not result.get("dry_run") and result.get("uidnext"):
+        return result["uidnext"]
+    return current
+
+
 def _idle_loop(cfg, stop):
     backoff = 5
     last_sweep = time.monotonic()
+    last_uidnext = None
+    last_uidvalidity = None
     while not stop.is_set():
         watcher = idle.IdleWatcher(cfg.gmail_user, cfg.gmail_password)
         try:
@@ -76,8 +106,13 @@ def _idle_loop(cfg, stop):
                 heartbeat=state.now_iso(),
             )
             log.info("watching INBOX with IDLE")
-            last_uidnext = watcher.uidnext
-            last_uidvalidity = watcher.uidvalidity
+            last_uidnext, last_uidvalidity, reset = _uid_reconnect_state(
+                last_uidnext, last_uidvalidity, watcher.uidnext, watcher.uidvalidity
+            )
+            if reset:
+                log.info("UIDVALIDITY changed; running a full sweep")
+                _log_summary("uidvalidity", runner.run_purge(cfg, reason="uidvalidity"))
+                last_sweep = time.monotonic()
             while not stop.is_set():
                 # Cap the wait so the hourly reconciliation sweep is actually
                 # hourly. A plain 29-minute IDLE only checks the clock every
@@ -104,12 +139,18 @@ def _idle_loop(cfg, stop):
                         result = runner.run_purge(cfg, reason="idle")
                         if incremental.get("uidvalidity"):
                             last_uidvalidity = incremental["uidvalidity"]
-                        if not result.get("dry_run") and incremental.get("uidnext"):
-                            last_uidnext = incremental["uidnext"]
+                        advance = incremental.get("uidnext") or incremental.get(
+                            "server_uidnext"
+                        )
+                        if (
+                            result.get("ok")
+                            and not result.get("dry_run")
+                            and advance
+                        ):
+                            last_uidnext = advance
                     else:
                         result = incremental
-                        if not result.get("dry_run") and result.get("uidnext"):
-                            last_uidnext = result["uidnext"]
+                        last_uidnext = _next_uidnext(result, last_uidnext)
                         if result.get("uidvalidity"):
                             last_uidvalidity = result["uidvalidity"]
                     _log_summary("idle", result)
