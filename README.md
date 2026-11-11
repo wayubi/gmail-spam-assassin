@@ -311,8 +311,11 @@ QUARANTINE_AGE: "3m"                # 14d, 3 months, 1y ...
 
 Each run does three things:
 
-1. **Expire.** Anything in the label from a currently listed sender that is
-   older than the age is copied to `[Gmail]/Trash`.
+1. **Expire.** The server is asked for messages in the label whose internal
+   date is before the cutoff (`UID SEARCH BEFORE`). Only those due messages are
+   fetched — the thousands of younger held messages are never transferred or
+   walked. The exact timestamp is checked again before anything is copied to
+   Trash, because IMAP dates are day-granular.
 2. **File.** A matching message younger than the age gets the label and loses
    `\Inbox`, so it leaves the inbox but stays in All Mail under the label.
 3. **Delete immediately.** A matching message already older than the age goes
@@ -324,6 +327,11 @@ The age is measured from the message itself: `INTERNALDATE` (Gmail's receive
 time) first, the `Date:` header as a fallback, future dates clamped to now.
 Days are exact 24-hour periods; months and years are calendar arithmetic
 clamped to the last valid day, so three months before 31 May is 28/29 February.
+
+The `MAX_DELETE_PER_RUN` cap (500) and a 2,000-message fetch ceiling only come
+into play when a large batch becomes due at once — for example after lowering
+`QUARANTINE_AGE` from three years to two weeks. Normal runs fetch a handful of
+due messages and leave the rest of the label alone.
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -337,8 +345,10 @@ Details that follow from the design:
   when it crosses the age, so the real lifetime is the age plus Gmail's 30 days
   in Trash.
 - Removing a sender stops its **queued** deletions too, because expiry only
-  touches senders still on the list. Its mail stays in the label and is
-  reported as stale; remove the label from those messages if you want it gone.
+  touches senders still on the list. Its mail stays in the label; it is
+  reported as stale when it reaches the age, and is never deleted unless the
+  sender is added back. Remove the label from those messages if you want it
+  gone.
 - The label is created automatically on the first run that has a quarantine
   entry, using IMAP `CREATE` (Gmail maps that onto a label). If creation fails,
   the run files and deletes nothing through quarantine and reports the server's

@@ -214,6 +214,37 @@ def search_uids(conn, raw_query, mailbox):
     return sorted(int(uid) for uid in uids)
 
 
+def search_before(conn, mailbox, day):
+    """UIDs whose internal date is before an IMAP date (e.g. 12-Nov-2023).
+
+    IMAP's BEFORE compares INTERNALDATE, which is exactly the clock this app
+    uses, and Gmail evaluates it server-side: only messages past the cutoff
+    come back. Nothing younger is fetched or examined.
+    """
+    select(conn, mailbox, readonly=True)
+    typ, data = conn.uid("SEARCH", "BEFORE", day)
+    if typ != "OK":
+        raise ImapError("search BEFORE %s failed in %s: %s" % (day, mailbox, data))
+    uids = []
+    for chunk in data:
+        if chunk:
+            uids.extend(chunk.split())
+    return sorted(int(uid) for uid in uids)
+
+
+def mailbox_count(conn, mailbox):
+    """Message count from STATUS, without listing or fetching any message."""
+    typ, data = conn.status(quote(mailbox), "(MESSAGES)")
+    if typ != "OK":
+        raise ImapError("STATUS failed for %s: %s" % (mailbox, data))
+    for item in data or []:
+        text = item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+        match = re.search(r"MESSAGES\s+(\d+)", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    raise ImapError("STATUS returned no MESSAGES count for %s: %s" % (mailbox, data))
+
+
 def all_uids(conn, mailbox):
     """Every UID in a mailbox, without Gmail's search syntax. Read-only."""
     select(conn, mailbox, readonly=True)

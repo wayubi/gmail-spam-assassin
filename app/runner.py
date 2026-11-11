@@ -17,7 +17,7 @@ expiry is the same COPY into [Gmail]/Trash that the blacklist uses.
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import blacklist, imap, quarantine, state, whitelist
 
@@ -337,23 +337,40 @@ def run_purge(cfg, dry_run=None, reason="manual"):
 def _quarantine_expire(
     conn, cfg, q_entries, hidden, label, trash, dry, summary, run_id, now
 ):
-    """Delete messages in the label that are past the configured age."""
+    """Delete messages in the label that are past the configured age.
+
+    The server does the date filtering: UID SEARCH BEFORE returns only the
+    messages whose INTERNALDATE is old enough, so the thousands of younger
+    held messages are never fetched or walked. The day is deliberately one
+    past the cutoff (IMAP dates are day-granular) and the exact timestamp is
+    checked again below, so nothing is deleted early.
+    """
+    cutoff = cfg.quarantine_age.cutoff(now)
+    day = (cutoff.date() + timedelta(days=1)).strftime("%d-%b-%Y")
     try:
-        uids = imap.all_uids(conn, label)
+        due = imap.search_before(conn, label, day)
     except imap.ImapError as exc:
         summary["errors"].append("quarantine scan in %s: %s" % (label, exc))
         return
-    if not uids:
-        summary["held"] = 0
+
+    try:
+        total = imap.mailbox_count(conn, label)
+    except imap.ImapError:
+        try:
+            total = len(imap.all_uids(conn, label))
+        except imap.ImapError:
+            total = 0
+    summary["held"] = total
+
+    if not due:
         return
     try:
-        metas = imap.fetch_meta(conn, uids[:FETCH_CEILING])
+        metas = imap.fetch_meta(conn, due[:FETCH_CEILING])
     except imap.ImapError as exc:
         summary["errors"].append("quarantine fetch in %s: %s" % (label, exc))
         return
 
     seen = set()
-    held = 0
     candidates = []
     repairs = []
     for meta in metas:
@@ -377,15 +394,13 @@ def _quarantine_expire(
             # Filing is two STOREs; if the second failed, finish the job here
             # instead of leaving it half-filed until it expires.
             repairs.append(meta)
+        # BEFORE is day-granular, so check the exact instant again.
         state_flag = cfg.quarantine_age.expired(meta["date"], now)
         if state_flag is None:
             summary["undated"] += 1
             continue
-        held += 1
         if state_flag:
             candidates.append(meta)
-
-    summary["held"] = held
 
     if repairs and not dry:
         try:
@@ -443,7 +458,7 @@ def _quarantine_expire(
         imap.select_writable(conn, label)
         moved = imap.move_to_trash(conn, [meta["uid"] for meta in limited], trash)
         summary["expired"] += moved
-        summary["held"] = max(0, held - moved)
+        summary["held"] = max(0, total - moved)
     except imap.ImapError as exc:
         summary["errors"].append("quarantine expiry in %s: %s" % (label, exc))
 
