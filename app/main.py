@@ -82,7 +82,7 @@ def _uid_reconnect_state(last_uidnext, last_uidvalidity, new_uidnext, new_uidval
 
 
 def _next_uidnext(result, current):
-    """Advance only when a run succeeded with no action errors.
+    """Advance only when an incremental run succeeded with no action errors.
 
     Dry runs advance too: switching to live requires a restart, and the startup
     full sweep re-examines everything. Holding the cursor in dry mode would
@@ -95,6 +95,20 @@ def _next_uidnext(result, current):
         and result.get("uidnext")
     ):
         return result["uidnext"]
+    return current
+
+
+def _fallback_uidnext(incremental, result, current):
+    """After a full fallback sweep, advance if the sweep completed.
+
+    Per-entry errors are retried by the next hourly sweep; gating on `errors`
+    here would turn every new email into another full sweep while a persistent
+    entry error exists.
+    """
+    if result.get("ok") and not result.get("skipped"):
+        advance = incremental.get("uidnext") or incremental.get("server_uidnext")
+        if advance:
+            return advance
     return current
 
 
@@ -149,15 +163,9 @@ def _idle_loop(cfg, stop):
                         result = runner.run_purge(cfg, reason="idle")
                         if incremental.get("uidvalidity"):
                             last_uidvalidity = incremental["uidvalidity"]
-                        advance = incremental.get("uidnext") or incremental.get(
-                            "server_uidnext"
+                        last_uidnext = _fallback_uidnext(
+                            incremental, result, last_uidnext
                         )
-                        if (
-                            result.get("ok")
-                            and not result.get("errors")
-                            and advance
-                        ):
-                            last_uidnext = advance
                     else:
                         result = incremental
                         last_uidnext = _next_uidnext(result, last_uidnext)

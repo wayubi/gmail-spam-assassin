@@ -355,19 +355,6 @@ def record_skipped(cfg, run_id, reason, dry=False):
     )
     try:
         state.append_audit(cfg.audit_path, dict(summary, kind="summary"))
-        state.update_state(
-            cfg.state_path,
-            last_run=summary["finished"],
-            last_run_id=run_id,
-            last_reason="api-skipped",
-            last_ok=False,
-            last_dry_run=dry,
-            last_error=reason,
-            last_duration_s=0.0,
-            running_phase=None,
-            running_counts=None,
-            heartbeat=state.now_iso(),
-        )
     except Exception:
         pass
     with _recent_lock:
@@ -378,15 +365,18 @@ def record_skipped(cfg, run_id, reason, dry=False):
 def run_purge(cfg, dry_run=None, reason="manual", run_id=None):
     """Run once, plus one coalesced rerun at the configured mode."""
     result = _run_once(cfg, dry_run=dry_run, reason=reason, run_id=run_id)
+    if result.get("skipped"):
+        # An explicit request that lost the lock race must not be retried in
+        # another mode under its own run_id. The busy run's wrapper performs
+        # the coalesced config-mode rerun; the API records this request as
+        # skipped.
+        return result
     if _rerun.is_set():
         _rerun.clear()
         # A trigger that arrived during the run is not the caller's explicit
         # request: rerun in the configured mode, not the caller's override.
-        # If the caller's first attempt never acquired the lock, keep its
-        # run_id so /runs/<id> can still resolve.
-        rerun_id = run_id if result.get("skipped") else None
         result = _run_once(
-            cfg, dry_run=None, reason=reason + "-rerun", run_id=rerun_id
+            cfg, dry_run=None, reason=reason + "-rerun", run_id=None
         )
     return result
 

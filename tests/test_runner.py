@@ -187,21 +187,20 @@ check("rerun uses config default", calls == [False, None], calls)
 runner._run_once = original_once
 runner._rerun.clear()
 
-print("skipped rerun keeps the run id")
+print("skipped request is not retried")
 calls = []
 
 
 def fake_once(cfg, dry_run=None, reason="manual", run_id=None):
     calls.append((dry_run, run_id))
-    if len(calls) == 1:
-        return {"ok": False, "skipped": "busy"}
-    return {"ok": True, "run_id": run_id}
+    return {"ok": False, "skipped": "busy"}
 
 
 runner._run_once = fake_once
 runner._rerun.set()
 runner.run_purge(cfg, dry_run=False, run_id="REQ123")
-check("rerun keeps the requested id", calls == [(False, "REQ123"), (None, "REQ123")], calls)
+check("skipped request makes one call", calls == [(False, "REQ123")], calls)
+check("rerun flag is left for the busy run", runner._rerun.is_set())
 runner._run_once = original_once
 runner._rerun.clear()
 
@@ -859,9 +858,15 @@ finally:
     imap.connect = lambda user, password, timeout=60: QuarantineConn()
 
 print("skipped run record")
+state.update_state(cfg.state_path, last_run_id="keep-me", last_run="sentinel")
 skipped = runner.record_skipped(qcfg, "skip-test", "another run is already in progress", True)
 check("skipped summary stored", runner.get_run("skip-test") is not None, skipped)
 check("skipped summary marked", skipped.get("ok") is False and skipped.get("skipped"), skipped)
+check(
+    "skip does not overwrite last state",
+    state.read_state(cfg.state_path).get("last_run_id") == "keep-me",
+    state.read_state(cfg.state_path),
+)
 
 print("incremental new-mail run")
 reset_list(path, ["@spam.example"])
@@ -926,6 +931,27 @@ check(
 check(
     "successful run advances",
     main_mod._next_uidnext({"ok": True, "dry_run": False, "uidnext": 999}, 100) == 999,
+)
+check(
+    "fallback advances despite entry errors",
+    main_mod._fallback_uidnext(
+        {"server_uidnext": 999}, {"ok": True, "errors": ["x"]}, 100
+    )
+    == 999,
+)
+check(
+    "fallback skip does not advance",
+    main_mod._fallback_uidnext(
+        {"server_uidnext": 999}, {"ok": True, "skipped": "busy"}, 100
+    )
+    == 100,
+)
+check(
+    "failed fallback does not advance",
+    main_mod._fallback_uidnext(
+        {"server_uidnext": 999}, {"ok": False}, 100
+    )
+    == 100,
 )
 
 print("no blacklist")
