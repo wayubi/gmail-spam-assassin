@@ -72,6 +72,17 @@ def _quarantine_overlaps(entry, entries):
     return any(_pattern_overlap(entry, other) for other in entries)
 
 
+def _quarantine_covers(entry, entries):
+    """True when quarantine shields the whole blacklist entry.
+
+    A wildcard blacklist entry with only some quarantined addresses inside it
+    is not fully covered: the rest of that domain must still be deleted.
+    """
+    if entry.startswith("@"):
+        return entry in entries
+    return quarantine.matches(entry, entries) is not None
+
+
 def _has_label(meta, label):
     wanted = label.lower()
     return any((name or "").lower() == wanted for name in meta.get("labels") or [])
@@ -163,12 +174,17 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                     "it will be deleted" % entry
                 )
             if _quarantine_overlaps(entry, q_entries):
-                skipped.add(entry)
-                summary["warnings"].append(
-                    "%s is in both the blacklist and quarantine; quarantine "
-                    "wins, so it is held before deletion instead of trashed "
-                    "immediately" % entry
-                )
+                if _quarantine_covers(entry, q_entries):
+                    skipped.add(entry)
+                    summary["warnings"].append(
+                        "%s is fully covered by quarantine; quarantine wins "
+                        "and the whole entry is skipped" % entry
+                    )
+                else:
+                    summary["warnings"].append(
+                        "%s overlaps quarantine; quarantine wins for the "
+                        "senders it names, the rest are still trashed" % entry
+                    )
         summary["blacklist_skipped"] = len(skipped)
 
         if not entries and not q_entries:
@@ -285,6 +301,7 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                     summary,
                     trash,
                     hidden,
+                    q_entries,
                 )
         summary["ok"] = True
     except Exception as exc:  # noqa: BLE001 - the run must always be recorded
@@ -603,7 +620,9 @@ def _quarantine_file(
             summary["errors"].append("quarantine expiry in %s: %s" % (all_mail, exc))
 
 
-def _purge_entry(conn, cfg, entry, mailbox, dry, budget, run_id, summary, trash, hidden):
+def _purge_entry(
+    conn, cfg, entry, mailbox, dry, budget, run_id, summary, trash, hidden, q_entries
+):
     query = "from:%s" % (entry[1:] if entry.startswith("@") else entry)
     try:
         uids = imap.search_uids(conn, query, mailbox)
@@ -634,6 +653,25 @@ def _purge_entry(conn, cfg, entry, mailbox, dry, budget, run_id, summary, trash,
         summary["suppressed"] += suppressed
     if not kept:
         return
+
+    # Quarantine wins over the blacklist per message. This matters when a
+    # blacklisted domain contains a quarantined address: that one sender is
+    # held, the rest of the domain is still deleted.
+    if q_entries:
+        held_back = [
+            meta
+            for meta in kept
+            if quarantine.matches(meta["from_addr"], q_entries) is not None
+        ]
+        if held_back:
+            summary["suppressed"] += len(held_back)
+            kept = [
+                meta
+                for meta in kept
+                if quarantine.matches(meta["from_addr"], q_entries) is None
+            ]
+        if not kept:
+            return
     hits = kept
 
     summary["matched"] += len(hits)

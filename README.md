@@ -66,6 +66,7 @@ says so; a dry run warns and continues.
 | Fails closed without Trash | if `[Gmail]/Trash` is not visible over IMAP, a live run deletes nothing and reports why |
 | `MAX_DELETE_PER_RUN=500` | a bad blacklist line cannot wipe the mailbox in one cycle |
 | Whitelist wins | a whitelist entry beats both delete lists; nothing from it is deleted, and the skip is counted |
+| Quarantine wins per message | if a blacklisted domain contains a quarantined address, that sender is held and the rest of the domain is still trashed |
 | Quarantine is reversible until expiry | filing is an `X-GM-LABELS` edit (label + remove Inbox), never a delete |
 | Quarantine ages by message date | `INTERNALDATE` first, `Date:` header as fallback; a future date cannot postpone deletion forever |
 | Quarantine only touches listed senders | removing a sender stops its queued deletions; leftover mail is reported as stale |
@@ -292,8 +293,10 @@ messages it skipped (`suppressed`) so the skip is never silent. The web page and
 the CLI also stop listing those senders, and report `N hidden by whitelist` so
 the filtering is visible rather than mysterious.
 
-Quarantine wins over the blacklist: a sender in both is held and deleted later
-rather than trashed immediately, and the run warns about the overlap.
+Quarantine wins over the blacklist per message: a quarantined address is held
+even when it sits inside a blacklisted domain, while the rest of that domain is
+still trashed. A sender in both is therefore deleted later, not immediately,
+and the run warns about the overlap.
 
 Edits are picked up on the next read or run; no restart. The API rewrites the
 files atomically and preserves your comments and ordering. `@gmail.com`-style
