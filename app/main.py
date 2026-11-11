@@ -77,13 +77,18 @@ def _idle_loop(cfg, stop):
             )
             log.info("watching INBOX with IDLE")
             while not stop.is_set():
-                result = watcher.idle(29 * 60)
+                # Cap the wait so the hourly reconciliation sweep is actually
+                # hourly. A plain 29-minute IDLE only checks the clock every
+                # third window, which drifts to about 87 minutes.
+                until_sweep = 3600 - (time.monotonic() - last_sweep)
+                if until_sweep <= 0:
+                    _log_summary("hourly", runner.run_purge(cfg, reason="hourly"))
+                    last_sweep = time.monotonic()
+                    continue
+                result = watcher.idle(min(29 * 60, until_sweep))
                 if result == "exists":
                     stop.wait(3)  # let a burst finish arriving, then one sweep
                     _log_summary("idle", runner.run_purge(cfg, reason="idle"))
-                    last_sweep = time.monotonic()
-                elif time.monotonic() - last_sweep > 3600:
-                    _log_summary("hourly", runner.run_purge(cfg, reason="hourly"))
                     last_sweep = time.monotonic()
                 else:
                     watcher.noop()
