@@ -175,6 +175,8 @@ def show_run(data):
     print("  expired      %s" % data.get("expired"))
     print("  would expire %s" % data.get("would_expire"))
     print("  held         %s" % data.get("held"))
+    if data.get("quarantine_created"):
+        print("  created      label %s" % data.get("quarantine_folder"))
     if data.get("quarantine_stale"):
         print("  stale label  %s" % data.get("quarantine_stale"))
     print("  capped       %s" % data.get("capped"))

@@ -32,10 +32,11 @@ services:
       # Optional: leave deletion off until a dry run looks correct.
       # DRY_RUN: "false"
 
-      # Optional: the quarantine hold. Create this label in Gmail first and
-      # enable "Show in IMAP" for it under Settings > Labels. Mail from senders
-      # on the quarantine list is filed here and deleted once it is older than
-      # the age below. Age accepts days, months or years: 14d, 3m, 1y.
+      # Optional: the quarantine hold. The label is created automatically on
+      # the first run that has a quarantine entry; you can also create it in
+      # Gmail and tick "Show in IMAP". Mail from senders on the quarantine list
+      # is filed here and deleted once it is older than the age below. Age
+      # accepts days, months or years: 14d, 3m, 1y.
       # QUARANTINE_LABEL: "Notifications"
       # QUARANTINE_AGE: "14d"
 

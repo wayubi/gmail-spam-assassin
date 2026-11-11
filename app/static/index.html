@@ -613,6 +613,7 @@ $("btn-run").addEventListener("click", async () => {
         + (data.would_file ? " · would file " + data.would_file : "")
         + (data.expired ? " · expired " + data.expired : "")
         + (data.would_expire ? " · would expire " + data.would_expire : "")
+        + (data.quarantine_created ? " · created label " + (data.quarantine_folder || data.quarantine_label) : "")
         + (data.suppressed ? " · suppressed " + data.suppressed : "")
         + (data.capped ? " · capped" : "")
         + (data.errors && data.errors.length ? "\n" + data.errors.join("\n") : "")

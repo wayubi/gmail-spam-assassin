@@ -189,6 +189,18 @@ def find_label(conn, name):
     return None
 
 
+def create_label(conn, name):
+    """Create a Gmail label. Gmail maps IMAP CREATE onto a label.
+
+    Returns the mailbox name Gmail reports after creation, or None if the
+    label still is not listed. Raises ImapError when the server refuses.
+    """
+    typ, data = conn.create(quote(name))
+    if typ != "OK":
+        raise ImapError("CREATE %r failed: %s" % (name, data))
+    return find_label(conn, name)
+
+
 def search_uids(conn, raw_query, mailbox):
     """Gmail-indexed search. Opens the mailbox read-only."""
     select(conn, mailbox, readonly=True)

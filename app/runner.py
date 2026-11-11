@@ -124,6 +124,7 @@ def run_purge(cfg, dry_run=None, reason="manual"):
         "whitelist_errors": [],
         "quarantine_entries": 0,
         "quarantine_errors": [],
+        "quarantine_created": False,
         "quarantine_label": cfg.quarantine_label,
         "quarantine_age": cfg.quarantine_age.text,
         "quarantine_cutoff": cfg.quarantine_age.cutoff(now).isoformat(
@@ -214,23 +215,37 @@ def run_purge(cfg, dry_run=None, reason="manual"):
         if q_entries:
             q_label = imap.find_label(conn, cfg.quarantine_label)
             if not q_label:
-                summary["errors"].append(
-                    "quarantine label %r is not visible over IMAP; create it "
-                    "in Gmail and enable 'Show in IMAP' under Settings > Labels"
-                    % cfg.quarantine_label
-                )
-            elif q_label.lower().startswith("[gmail]") or q_label.lower() in (
-                "inbox",
-                "all mail",
-                "spam",
-                "trash",
+                # Gmail maps IMAP CREATE onto a label. Create it on demand so
+                # the list works without a manual trip through Settings; if
+                # the server refuses, say exactly what it said.
+                try:
+                    q_label = imap.create_label(conn, cfg.quarantine_label)
+                except imap.ImapError as exc:
+                    summary["errors"].append(
+                        "quarantine label %r is missing or hidden, and IMAP "
+                        "could not create it (%s); if it already exists in "
+                        "Gmail, enable 'Show in IMAP' under Settings > Labels, "
+                        "otherwise create it there" % (cfg.quarantine_label, exc)
+                    )
+                else:
+                    if q_label:
+                        summary["quarantine_created"] = True
+                    else:
+                        summary["errors"].append(
+                            "created quarantine label %r but it is still not "
+                            "listed; enable 'Show in IMAP' for it under Gmail "
+                            "Settings > Labels" % cfg.quarantine_label
+                        )
+            if q_label and (
+                q_label.lower().startswith("[gmail]")
+                or q_label.lower() in ("inbox", "all mail", "spam", "trash")
             ):
                 summary["errors"].append(
                     "quarantine label %r resolved to a system folder; refusing "
                     "to use it" % q_label
                 )
                 q_label = None
-            else:
+            elif q_label:
                 summary["quarantine_folder"] = q_label
 
         if q_entries and q_label:

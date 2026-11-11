@@ -86,10 +86,10 @@ says so; a dry run warns and continues.
   **Trash** → *Show in IMAP*. This is off by default. Deletion is a `COPY` into
   `[Gmail]/Trash`, so without it a live run refuses to delete anything.
   (Optional: the same switch on **Spam**, if you also want spam swept.)
-- **Quarantine label**: if you use the quarantine list, create the label in
-  Gmail (e.g. `Notifications`) and tick *Show in IMAP* for it under
-  Settings → Labels. IMAP cannot create labels, and a label that is not shown
-  is not a folder the app can file into. Set its name in `QUARANTINE_LABEL`.
+- **Quarantine label**: create it in Gmail if you prefer (e.g. `Notifications`),
+  or let the first quarantine run create it over IMAP. If you create it
+  yourself, Settings → Labels is also where *Show in IMAP* lives; a label the
+  app created is visible automatically. Set its name in `QUARANTINE_LABEL`.
 - **Leave the expunge setting alone**: *Forwarding and POP/IMAP → "When a
   message is marked as deleted and expunged from the last visible IMAP
   folder"*. This app never expunges, so the setting does not matter to it —
@@ -339,9 +339,10 @@ Details that follow from the design:
 - Removing a sender stops its **queued** deletions too, because expiry only
   touches senders still on the list. Its mail stays in the label and is
   reported as stale; remove the label from those messages if you want it gone.
-- The label must exist and be shown in IMAP. If it is missing, the run files
-  nothing and deletes nothing through quarantine, and says so; the blacklist
-  still works.
+- The label is created automatically on the first run that has a quarantine
+  entry, using IMAP `CREATE` (Gmail maps that onto a label). If creation fails,
+  the run files and deletes nothing through quarantine and reports the server's
+  reason; the blacklist still works.
 - Free-mail wildcards are refused, because this list ends in deletion.
 - Spam is not quarantined: only All Mail is searched, so mail that Gmail has
   already classified as spam is left to the blacklist (or Gmail's own 30-day
@@ -425,7 +426,7 @@ filed stays in the label, reported as stale, until you clear it.
 | `cannot open [Gmail]/All Mail` | unusual folder naming; the code also tries `[Google Mail]/…`; run `spam-assassin mailboxes` to see what exists |
 | `[Gmail]/Spam is not exposed over IMAP` | Gmail → Settings → Labels → System labels → **Spam** → *Show in IMAP*. Without it, spam is not swept (everything else still works) |
 | `[Gmail]/Trash is not exposed over IMAP` | Gmail → Settings → Labels → System labels → **Trash** → *Show in IMAP*. A live run refuses to delete until this is on, because there would be no recovery window |
-| `quarantine label ... is not visible over IMAP` | create the label in Gmail and tick *Show in IMAP*; IMAP cannot create labels. Until then quarantine files and deletes nothing |
+| `quarantine label ... could not be created` | Gmail refused `CREATE` (name clash, reserved name, or IMAP disabled). Create it manually under Settings → Labels and tick *Show in IMAP* |
 | quarantine never files anything | `QUARANTINE_AGE` may already have passed for that mail, in which case it goes straight to Trash; check the run summary |
 | `QUARANTINE_ABORT_OVER` warning | more messages would expire than the brake allows; raise it deliberately, or leave it as a safety stop |
 | run reports `matched` but nothing leaves the inbox | `DRY_RUN=true`, or the messages are already in Trash |
