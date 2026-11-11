@@ -382,7 +382,12 @@ def run_purge(cfg, dry_run=None, reason="manual", run_id=None):
         _rerun.clear()
         # A trigger that arrived during the run is not the caller's explicit
         # request: rerun in the configured mode, not the caller's override.
-        result = _run_once(cfg, dry_run=None, reason=reason + "-rerun", run_id=None)
+        # If the caller's first attempt never acquired the lock, keep its
+        # run_id so /runs/<id> can still resolve.
+        rerun_id = run_id if result.get("skipped") else None
+        result = _run_once(
+            cfg, dry_run=None, reason=reason + "-rerun", run_id=rerun_id
+        )
     return result
 
 

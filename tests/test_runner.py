@@ -187,6 +187,24 @@ check("rerun uses config default", calls == [False, None], calls)
 runner._run_once = original_once
 runner._rerun.clear()
 
+print("skipped rerun keeps the run id")
+calls = []
+
+
+def fake_once(cfg, dry_run=None, reason="manual", run_id=None):
+    calls.append((dry_run, run_id))
+    if len(calls) == 1:
+        return {"ok": False, "skipped": "busy"}
+    return {"ok": True, "run_id": run_id}
+
+
+runner._run_once = fake_once
+runner._rerun.set()
+runner.run_purge(cfg, dry_run=False, run_id="REQ123")
+check("rerun keeps the requested id", calls == [(False, "REQ123"), (None, "REQ123")], calls)
+runner._run_once = original_once
+runner._rerun.clear()
+
 print("cap")
 blacklist.add(path, ["second@spam.example"])
 cfg2 = config.load()
