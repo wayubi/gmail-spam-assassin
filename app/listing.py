@@ -51,10 +51,7 @@ def _drop_connection():
     global _conn, _conn_key
     with _conn_lock:
         if _conn is not None:
-            try:
-                imap.logout(_conn)
-            except Exception:
-                pass
+            imap.shutdown(_conn)
         _conn = None
         _conn_key = None
 
@@ -69,10 +66,7 @@ def _work_once(cfg, work, retry):
             or time.monotonic() - _conn_last_used > 600
         ):
             if _conn is not None:
-                try:
-                    imap.logout(_conn)
-                except Exception:
-                    pass
+                imap.shutdown(_conn)
             _conn = imap.connect(cfg.gmail_user, cfg.gmail_password)
             _conn_key = key
         try:
@@ -80,10 +74,7 @@ def _work_once(cfg, work, retry):
             _conn_last_used = time.monotonic()
             return value
         except (imaplib.IMAP4.abort, OSError):
-            try:
-                imap.logout(_conn)
-            except Exception:
-                pass
+            imap.shutdown(_conn)
             _conn = None
             _conn_key = None
             if not retry:

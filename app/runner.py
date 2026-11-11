@@ -289,7 +289,7 @@ def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
         # An incremental run does not scan the label; keep the last full count.
         summary["held"] = state.read_state(cfg.state_path).get("last_held", 0)
     extra = {}
-    for key in ("quarantine_batch_offset", "blacklist_batch_offset"):
+    for key in ("quarantine_batch_offset", "blacklist_batch_offset", "blacklist_mailbox_offset"):
         if key in summary:
             extra[key] = summary[key]
     try:
@@ -336,6 +336,43 @@ def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
             _recent_runs.append(dict(summary))
     except Exception:
         pass
+
+
+def record_skipped(cfg, run_id, reason, dry=False):
+    """Record a requested run that never acquired the lock.
+
+    Without this the caller holds a run id that never appears, and the page or
+    CLI waits for a summary that will not exist.
+    """
+    now = _now()
+    summary = _new_summary(cfg, run_id, dry, "api-skipped", now)
+    summary.update(
+        ok=False,
+        skipped=reason,
+        errors=[reason],
+        finished=state.now_iso(),
+        duration_s=0.0,
+    )
+    try:
+        state.append_audit(cfg.audit_path, dict(summary, kind="summary"))
+        state.update_state(
+            cfg.state_path,
+            last_run=summary["finished"],
+            last_run_id=run_id,
+            last_reason="api-skipped",
+            last_ok=False,
+            last_dry_run=dry,
+            last_error=reason,
+            last_duration_s=0.0,
+            running_phase=None,
+            running_counts=None,
+            heartbeat=state.now_iso(),
+        )
+    except Exception:
+        pass
+    with _recent_lock:
+        _recent_runs.append(dict(summary))
+    return summary
 
 
 def run_purge(cfg, dry_run=None, reason="manual", run_id=None):
@@ -472,8 +509,10 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
                 summary["quarantine_folder"] = q_label
 
         prior = state.read_state(cfg.state_path)
+        # Shared by dry and live runs: rotation only affects fairness.
         q_offset = int(prior.get("quarantine_batch_offset") or 0)
         b_offset = int(prior.get("blacklist_batch_offset") or 0)
+        bm_offset = int(prior.get("blacklist_mailbox_offset") or 0)
 
         if q_entries and q_label:
             phase_started = time.monotonic()
@@ -506,7 +545,7 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
         if active:
             phase_started = time.monotonic()
             _progress(cfg, summary, "purge")
-            b_offset = _purge_batches(
+            b_offset, bm_offset = _purge_batches(
                 conn,
                 cfg,
                 active,
@@ -518,8 +557,10 @@ def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
                 summary,
                 run_id,
                 b_offset,
+                bm_offset,
             )
             summary["blacklist_batch_offset"] = b_offset
+            summary["blacklist_mailbox_offset"] = bm_offset
             summary["phase_s"]["purge"] = round(time.monotonic() - phase_started, 2)
         _progress(cfg, summary, None)
         summary["ok"] = True
@@ -1125,15 +1166,22 @@ def _purge_batches(
     summary,
     run_id,
     offset=0,
+    mailbox_offset=0,
 ):
     """Delete blacklisted mail in batches of senders, not one sender at a time.
 
-    The starting batch rotates so an early sender cannot starve later ones.
+    Both the starting batch and the mailbox order rotate, so neither an early
+    sender nor the first mailbox can starve the rest. No extra IMAP commands.
     """
     seen = set()
     batches = list(_chunks(entries, SEARCH_BATCH))
+    count_mailboxes = max(1, len(mailboxes))
+    mailbox_offset = max(0, int(mailbox_offset)) % count_mailboxes
+    next_mailbox = (mailbox_offset + 1) % count_mailboxes
+    if count_mailboxes > 1:
+        mailboxes = mailboxes[mailbox_offset:] + mailboxes[:mailbox_offset]
     if not batches:
-        return 0
+        return 0, next_mailbox
     offset = max(0, int(offset)) % len(batches)
     ordered = batches[offset:] + batches[:offset]
     stop_index = None
@@ -1229,5 +1277,5 @@ def _purge_batches(
             break
 
     if stop_index is None:
-        return 0
-    return (offset + stop_index + 1) % len(batches)
+        return 0, next_mailbox
+    return (offset + stop_index + 1) % len(batches), next_mailbox

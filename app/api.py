@@ -349,11 +349,13 @@ class Handler(BaseHTTPRequestHandler):
 
         def work():
             try:
-                runner.run_purge(
+                result = runner.run_purge(
                     cfg, dry_run=dry, reason="api", run_id=run_id
                 )
             except Exception:  # noqa: BLE001 - a background thread must not die loudly
                 return
+            if result and result.get("skipped"):
+                runner.record_skipped(cfg, run_id, result["skipped"], dry)
 
         threading.Thread(target=work, name="api-run", daemon=True).start()
         return self._json(202, {"accepted": True, "run_id": run_id, "running": True})

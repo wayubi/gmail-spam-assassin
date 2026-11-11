@@ -171,6 +171,9 @@ def show_run(data):
     if not data:
         print("run finished, but no summary was found")
         return
+    if data.get("skipped"):
+        print("skipped: %s" % data["skipped"])
+        return
     print("run %s (%s)%s" % (data.get("run_id"), data.get("reason"),
                              " DRY RUN" if data.get("dry_run") else ""))
     print("  matched      %s" % data.get("matched"))

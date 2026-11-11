@@ -82,8 +82,18 @@ def _uid_reconnect_state(last_uidnext, last_uidvalidity, new_uidnext, new_uidval
 
 
 def _next_uidnext(result, current):
-    """Advance only when a run succeeded and actually processed mail."""
-    if result.get("ok") and not result.get("dry_run") and result.get("uidnext"):
+    """Advance only when a run succeeded with no action errors.
+
+    Dry runs advance too: switching to live requires a restart, and the startup
+    full sweep re-examines everything. Holding the cursor in dry mode would
+    make every new message repeat the same incremental work and eventually
+    turn into full sweeps.
+    """
+    if (
+        result.get("ok")
+        and not result.get("errors")
+        and result.get("uidnext")
+    ):
         return result["uidnext"]
     return current
 
@@ -144,7 +154,7 @@ def _idle_loop(cfg, stop):
                         )
                         if (
                             result.get("ok")
-                            and not result.get("dry_run")
+                            and not result.get("errors")
                             and advance
                         ):
                             last_uidnext = advance

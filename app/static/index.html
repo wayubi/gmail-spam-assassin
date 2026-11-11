@@ -632,6 +632,10 @@ $("q-input").addEventListener("keydown", (event) => {
 
 function toastRun(data) {
   if (!data) return;
+  if (data.skipped) {
+    toast("run skipped: " + data.skipped, true);
+    return;
+  }
   toast(
     (data.dry_run ? "DRY RUN" : "run") + " " + data.run_id + "\n"
     + "matched " + data.matched + " · trashed " + data.trashed

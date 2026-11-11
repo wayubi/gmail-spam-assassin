@@ -554,4 +554,18 @@ def logout(conn):
         pass
 
 
+def shutdown(conn):
+    """Close locally without waiting for CLOSE/LOGOUT replies.
+
+    For a stale or aborted connection, the polite commands can block for the
+    socket timeout. Nothing is lost by dropping a read-only session abruptly.
+    """
+    if conn is None:
+        return
+    try:
+        conn.shutdown()
+    except Exception:
+        pass
+
+
 _logout = logout
