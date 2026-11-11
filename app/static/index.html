@@ -571,6 +571,11 @@ async function addAddresses(addresses, after, endpoint) {
     if (result.added.length) parts.push("added " + result.added.length + " to " + listName);
     if (result.skipped.length) parts.push("already on the " + listName);
     if (result.errors.length) parts.push("rejected " + result.errors.length);
+    const moved = result.removed_from || {};
+    const movedNames = Object.keys(moved);
+    if (movedNames.length) {
+      parts.push("removed from " + movedNames.map((name) => name + " (" + moved[name].length + ")").join(" and "));
+    }
     toast(parts.join(", ") + (result.added.length ? ":\n" + result.added.join("\n") : ""));
     if (result.errors.length) {
       toast(result.errors.map((e) => e.entry + ": " + e.reason).join("\n"), true);

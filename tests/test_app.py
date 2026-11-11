@@ -268,6 +268,66 @@ status, payload = call("POST", "/whitelist/remove", {"addresses": ["@gmail.com"]
 check("whitelist remove", payload["removed"] == ["@gmail.com"], payload)
 status, payload = call("DELETE", "/whitelist/keep%40example.com")
 check("whitelist delete by path", payload["removed"] == ["keep@example.com"], payload)
+
+status, payload = call("POST", "/quarantine", {"addresses": ["move@example.com"]})
+check("move setup quarantine", payload["added"] == ["move@example.com"], payload)
+status, payload = call("POST", "/blacklist", {"addresses": ["move@example.com"]})
+check(
+    "add to blacklist removes from quarantine",
+    payload["added"] == ["move@example.com"]
+    and payload["removed_from"].get("quarantine") == ["move@example.com"],
+    payload,
+)
+status, payload = call("GET", "/quarantine")
+check("quarantine no longer has it", "move@example.com" not in payload["entries"], payload)
+
+status, payload = call("POST", "/whitelist", {"addresses": ["@move.example"]})
+check("move setup whitelist", payload["added"] == ["@move.example"], payload)
+status, payload = call("POST", "/quarantine", {"addresses": ["@move.example"]})
+check(
+    "add to quarantine removes from whitelist",
+    payload["removed_from"].get("whitelist") == ["@move.example"],
+    payload,
+)
+
+status, payload = call("POST", "/blacklist", {"addresses": ["both@example.com"]})
+check("both setup blacklist", payload["added"] == ["both@example.com"], payload)
+status, payload = call("POST", "/quarantine", {"addresses": ["both@example.com"]})
+check("both moved to quarantine", payload["removed_from"].get("blacklist") == ["both@example.com"], payload)
+status, payload = call("POST", "/quarantine", {"addresses": ["both@example.com"]})
+check(
+    "repeat add is a no-op",
+    payload["skipped"] == ["both@example.com"]
+    and payload["removed_from"] == {},
+    payload,
+)
+
+status, payload = call("POST", "/quarantine", {"addresses": ["dup@example.com"]})
+check("dup setup quarantine", payload["added"] == ["dup@example.com"], payload)
+blacklist.add(cfg.blacklist_path, ["dup@example.com"])
+status, payload = call("POST", "/blacklist", {"addresses": ["dup@example.com"]})
+check(
+    "skipped target still cleans the other list",
+    payload["skipped"] == ["dup@example.com"]
+    and payload["removed_from"].get("quarantine") == ["dup@example.com"],
+    payload,
+)
+
+status, payload = call("POST", "/whitelist", {"addresses": ["exact@keep.example"]})
+check("exact setup whitelist", payload["added"] == ["exact@keep.example"], payload)
+status, payload = call("POST", "/blacklist", {"addresses": ["@keep.example"]})
+check(
+    "domain add does not remove exact whitelist",
+    payload["removed_from"] == {},
+    payload,
+)
+status, payload = call("GET", "/whitelist")
+check("exact whitelist remains", "exact@keep.example" in payload["entries"], payload)
+
+# Clean up the exclusivity fixtures.
+call("POST", "/blacklist/remove", {"addresses": ["move@example.com", "both@example.com", "dup@example.com", "@keep.example"]})
+call("POST", "/quarantine/remove", {"addresses": ["@move.example", "both@example.com", "dup@example.com"]})
+call("POST", "/whitelist/remove", {"addresses": ["exact@keep.example"]})
 status, payload = call("GET", "/quarantine")
 check(
     "quarantine starts empty with config",

@@ -241,6 +241,9 @@ class Handler(BaseHTTPRequestHandler):
         result = blacklist.add(
             self.cfg.blacklist_path, addresses, self.cfg.allow_freemail_domains
         )
+        result["removed_from"] = self._exclusive(
+            result["added"] + result["skipped"], "blacklist"
+        )
         result["count"] = len(
             blacklist.load(
                 self.cfg.blacklist_path, self.cfg.allow_freemail_domains
@@ -272,6 +275,27 @@ class Handler(BaseHTTPRequestHandler):
             return None, self._json(400, {"error": "expected {\"addresses\": [...]}"})
         return addresses, None
 
+    def _exclusive(self, entries, target):
+        """Remove the same entries from the other two lists.
+
+        Adding is the only operation that enforces exclusivity. Exact entries
+        only: adding a whole domain does not remove an exact address at that
+        domain, and vice versa; those keep precedence and its warning.
+        """
+        moved = {}
+        lists = (
+            ("blacklist", self.cfg.blacklist_path, blacklist.remove),
+            ("whitelist", self.cfg.whitelist_path, whitelist.remove),
+            ("quarantine", self.cfg.quarantine_path, quarantine.remove),
+        )
+        for name, path, remove in lists:
+            if name == target:
+                continue
+            result = remove(path, entries)
+            if result.get("removed"):
+                moved[name] = result["removed"]
+        return moved
+
     def _whitelist(self, head_only):
         entries, errors = whitelist.load(self.cfg.whitelist_path)
         return self._json(
@@ -290,6 +314,9 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = whitelist.add(self.cfg.whitelist_path, addresses)
+        result["removed_from"] = self._exclusive(
+            result["added"] + result["skipped"], "whitelist"
+        )
         result["count"] = len(whitelist.load(self.cfg.whitelist_path)[0])
         return self._json(200, result)
 
@@ -323,6 +350,9 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = quarantine.add(self.cfg.quarantine_path, addresses)
+        result["removed_from"] = self._exclusive(
+            result["added"] + result["skipped"], "quarantine"
+        )
         result["count"] = len(quarantine.load(self.cfg.quarantine_path)[0])
         return self._json(200, result)
 

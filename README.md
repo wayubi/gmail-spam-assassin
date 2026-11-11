@@ -313,6 +313,12 @@ wildcards are refused in both delete lists unless you set
 `ALLOW_FREEMAIL_DOMAINS=true`; they are always allowed in the whitelist, where
 they can only hide mail, never delete it.
 
+Adding an entry through the API, CLI or page **moves it**: the same exact
+entry is removed from the other two lists. It does not remove a broader or
+narrower entry — adding `a@example.com` leaves a `@example.com` entry alone,
+and adding `@example.com` leaves an exact address alone. Those overlaps keep
+the precedence rules above. Hand-editing the files bypasses the move.
+
 ### Quarantine
 
 ```yaml
