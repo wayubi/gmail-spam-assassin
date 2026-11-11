@@ -25,6 +25,16 @@ from . import blacklist, imap, quarantine, state, whitelist
 # Deleting makes the next search smaller, so progress continues either way.
 FETCH_CEILING = 2000
 
+# Sender searches are unioned into batches: one server round-trip per 25
+# senders instead of one per sender. With hundreds of entries this is the
+# difference between ~35 searches and ~800 per run.
+SEARCH_BATCH = 25
+
+# Headers fetched per batch per pass. Only a page is needed: the per-run
+# budgets decide how many can be acted on, and whatever is handled drops out
+# of the next search.
+FETCH_PAGE = 500
+
 # Labelling is cheap but not free, and a huge burst should not hold the run
 # open for an hour. The rest is filed on the next cycle.
 FILE_CEILING = 2000
@@ -96,6 +106,44 @@ def _delete_budget(cfg, summary):
         + summary["would_expire"]
     )
     return cfg.max_delete_per_run - used
+
+
+def _file_budget(summary):
+    return FILE_CEILING - summary["filed"] - summary["would_file"]
+
+
+def _chunks(items, size):
+    items = list(items)
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _batch_query(entries, extra=""):
+    """One Gmail search for a set of senders, e.g. {from:a from:b}."""
+    terms = " ".join(
+        "from:%s" % (entry[1:] if entry.startswith("@") else entry)
+        for entry in entries
+    )
+    if len(entries) == 1:
+        query = terms
+    else:
+        query = "{%s}" % terms
+    if extra:
+        query += " " + extra
+    return query
+
+
+def _search_batch(conn, mailbox, entries, extra=""):
+    """Search a batch, splitting it on error so one bad entry cannot break it."""
+    try:
+        return imap.search_uids(conn, _batch_query(entries, extra), mailbox), None
+    except imap.ImapError as exc:
+        if len(entries) <= 1:
+            return [], "%s: %s" % (entries[0] if entries else "?", exc)
+        middle = len(entries) // 2
+        left, left_error = _search_batch(conn, mailbox, entries[:middle], extra)
+        right, right_error = _search_batch(conn, mailbox, entries[middle:], extra)
+        return left + right, left_error or right_error
 
 
 def _audit(cfg, summary, **record):
@@ -282,27 +330,20 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                 now,
             )
 
-        for entry in entries:
-            if entry in skipped:
-                continue
-            for mailbox in mailboxes:
-                remaining = _delete_budget(cfg, summary)
-                if remaining <= 0:
-                    summary["capped"] = True
-                    break
-                _purge_entry(
-                    conn,
-                    cfg,
-                    entry,
-                    mailbox,
-                    dry,
-                    remaining,
-                    run_id,
-                    summary,
-                    trash,
-                    hidden,
-                    q_entries,
-                )
+        active = [entry for entry in entries if entry not in skipped]
+        if active:
+            _purge_batches(
+                conn,
+                cfg,
+                active,
+                q_entries,
+                hidden,
+                mailboxes,
+                trash,
+                dry,
+                summary,
+                run_id,
+            )
         summary["ok"] = True
     except Exception as exc:  # noqa: BLE001 - the run must always be recorded
         summary["ok"] = False
@@ -483,228 +524,278 @@ def _quarantine_expire(
 def _quarantine_file(
     conn, cfg, q_entries, hidden, label, all_mail, trash, dry, summary, run_id, now
 ):
-    """Label recent mail, and send already-old matches straight to Trash."""
-    files = []
-    expired = []
+    """Label recent mail, and send already-old matches straight to Trash.
+
+    Searches are batched and split by age, so Gmail does the filtering:
+    older_than/newer_than plus -label mean only actionable messages come back.
+    """
     seen = set()
-
-    for entry in q_entries:
-        sender = entry[1:] if entry.startswith("@") else entry
-        # Excluding the label keeps a big backlog from pinning the first 2000
-        # search hits forever: filed mail drops out, so each run progresses.
-        query = 'from:%s -label:"%s"' % (sender, label)
-        try:
-            uids = imap.search_uids(conn, query, all_mail)
-        except imap.ImapError as exc:
-            summary["errors"].append("%s in %s: %s" % (entry, all_mail, exc))
-            continue
-        if not uids:
-            continue
-        try:
-            metas = imap.fetch_meta(conn, uids[-FETCH_CEILING:])
-        except imap.ImapError as exc:
-            summary["errors"].append("fetch in %s: %s" % (all_mail, exc))
-            continue
-
-        for meta in metas:
-            # Gmail's from: search is a substring match; only exact senders
-            # qualify, same rule as the blacklist.
-            if not _covers(entry, meta["from_addr"]):
-                continue
-            key = meta["msgid"] or ("uid:%s" % meta["uid"])
-            if key in seen:
-                continue
-            seen.add(key)
-            if whitelist.matches(meta["from_addr"], hidden):
-                summary["suppressed"] += 1
-                continue
-            labelled = _has_label(meta, label)
-            inboxed = any(
-                (name or "").lower() == "inbox" for name in meta.get("labels") or []
-            )
-            # Already filed and out of Inbox: the expiry pass owns it now.
-            if labelled and not inboxed:
-                continue
-            state_flag = cfg.quarantine_age.expired(meta["date"], now)
-            if state_flag is None:
-                summary["undated"] += 1
-                continue
-            if state_flag:
-                expired.append(meta)
-            else:
-                files.append(meta)
-
-    if expired and cfg.quarantine_abort_over and len(expired) > cfg.quarantine_abort_over:
-        summary["warnings"].append(
-            "quarantine: %d matched messages are already past %s but "
-            "QUARANTINE_ABORT_OVER=%d; they were left in place. Raise the "
-            "limit deliberately to delete them."
-            % (len(expired), cfg.quarantine_age.text, cfg.quarantine_abort_over)
-        )
-        expired = []
-
-    if len(files) > FILE_CEILING:
-        files = files[:FILE_CEILING]
-        summary["capped"] = True
-
-    remaining = _delete_budget(cfg, summary)
-    if remaining <= 0:
-        if expired:
+    age = cfg.quarantine_age
+    streams = (
+        ("older_than:%s" % age.gmail, True),
+        ("newer_than:%s" % age.gmail, False),
+    )
+    for batch in _chunks(q_entries, SEARCH_BATCH):
+        if _file_budget(summary) <= 0 and _delete_budget(cfg, summary) <= 0:
             summary["capped"] = True
-        expired = []
-    else:
-        limited = expired[:remaining]
-        if len(expired) > remaining:
-            summary["capped"] = True
-        expired = limited
+            break
+        batch_files = []
+        batch_expired = []
+        for criterion, oldest_first in streams:
+            if criterion.startswith("older") and _delete_budget(cfg, summary) <= 0:
+                continue
+            if criterion.startswith("newer") and _file_budget(summary) <= 0:
+                continue
+            extra = '-label:"%s" %s' % (label, criterion)
+            uids, error = _search_batch(conn, all_mail, batch, extra)
+            if error:
+                summary["errors"].append(
+                    "quarantine search in %s: %s" % (all_mail, error)
+                )
+            if not uids:
+                continue
+            page = uids[:FETCH_PAGE] if oldest_first else uids[-FETCH_PAGE:]
+            try:
+                metas = imap.fetch_meta(conn, page)
+            except imap.ImapError as exc:
+                summary["errors"].append("fetch in %s: %s" % (all_mail, exc))
+                continue
+            for meta in metas:
+                entry = quarantine.matches(meta["from_addr"], batch)
+                if entry is None:
+                    # Substring hit, not an exact sender.
+                    continue
+                key = meta["msgid"] or ("uid:%s" % meta["uid"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                if whitelist.matches(meta["from_addr"], hidden):
+                    summary["suppressed"] += 1
+                    continue
+                if _has_label(meta, label):
+                    # -label should have excluded it; belt and braces.
+                    continue
+                state_flag = age.expired(meta["date"], now)
+                if state_flag is None:
+                    summary["undated"] += 1
+                    continue
+                if state_flag:
+                    batch_expired.append(meta)
+                else:
+                    batch_files.append(meta)
 
-    for meta in files:
-        _audit(
-            cfg,
-            summary,
-            kind="message",
-            run_id=run_id,
-            dry_run=dry,
-            entry=quarantine.matches(meta["from_addr"], q_entries),
-            folder=all_mail,
-            uid=meta["uid"],
-            msgid=meta["msgid"],
-            **{"from": meta["from_addr"]},
-            from_name=meta["from_name"],
-            subject=meta["subject"],
-            date=meta["date"],
-            label=label,
-            action="would-quarantine" if dry else "quarantined",
-        )
-    for meta in expired:
-        _audit(
-            cfg,
-            summary,
-            kind="message",
-            run_id=run_id,
-            dry_run=dry,
-            entry=quarantine.matches(meta["from_addr"], q_entries),
-            folder=all_mail,
-            uid=meta["uid"],
-            msgid=meta["msgid"],
-            **{"from": meta["from_addr"]},
-            from_name=meta["from_name"],
-            subject=meta["subject"],
-            date=meta["date"],
-            label=label,
-            action="would-expire" if dry else "expired",
-        )
-
-    if dry:
-        summary["would_file"] += len(files)
-        summary["would_expire"] += len(expired)
-        return
-
-    if files:
-        try:
-            imap.select_writable(conn, all_mail)
-            uids = [meta["uid"] for meta in files]
-            imap.add_labels(conn, uids, [label])
-            imap.remove_labels(conn, uids, ["\\Inbox"])
-            summary["filed"] += len(files)
-        except imap.ImapError as exc:
-            summary["errors"].append("quarantine filing in %s: %s" % (all_mail, exc))
-
-    if expired:
-        try:
-            imap.select_writable(conn, all_mail)
-            summary["expired"] += imap.move_to_trash(
-                conn, [meta["uid"] for meta in expired], trash
+        delete_left = _delete_budget(cfg, summary)
+        file_left = _file_budget(summary)
+        if (
+            batch_expired
+            and cfg.quarantine_abort_over
+            and len(batch_expired) > cfg.quarantine_abort_over
+        ):
+            summary["warnings"].append(
+                "quarantine: %d matched messages are already past %s but "
+                "QUARANTINE_ABORT_OVER=%d; they were left in place. Raise the "
+                "limit deliberately to delete them."
+                % (len(batch_expired), age.text, cfg.quarantine_abort_over)
             )
-        except imap.ImapError as exc:
-            summary["errors"].append("quarantine expiry in %s: %s" % (all_mail, exc))
+            batch_expired = []
+        if len(batch_expired) > max(0, delete_left):
+            batch_expired = batch_expired[: max(0, delete_left)]
+            summary["capped"] = True
+        if len(batch_files) > max(0, file_left):
+            batch_files = batch_files[: max(0, file_left)]
+            summary["capped"] = True
+        if not batch_files and not batch_expired:
+            continue
+
+        for meta in batch_files:
+            _audit(
+                cfg,
+                summary,
+                kind="message",
+                run_id=run_id,
+                dry_run=dry,
+                entry=quarantine.matches(meta["from_addr"], q_entries),
+                folder=all_mail,
+                uid=meta["uid"],
+                msgid=meta["msgid"],
+                **{"from": meta["from_addr"]},
+                from_name=meta["from_name"],
+                subject=meta["subject"],
+                date=meta["date"],
+                label=label,
+                action="would-quarantine" if dry else "quarantined",
+            )
+        for meta in batch_expired:
+            _audit(
+                cfg,
+                summary,
+                kind="message",
+                run_id=run_id,
+                dry_run=dry,
+                entry=quarantine.matches(meta["from_addr"], q_entries),
+                folder=all_mail,
+                uid=meta["uid"],
+                msgid=meta["msgid"],
+                **{"from": meta["from_addr"]},
+                from_name=meta["from_name"],
+                subject=meta["subject"],
+                date=meta["date"],
+                label=label,
+                action="would-expire" if dry else "expired",
+            )
+
+        if dry:
+            summary["would_file"] += len(batch_files)
+            summary["would_expire"] += len(batch_expired)
+            continue
+
+        if batch_files:
+            try:
+                imap.select_writable(conn, all_mail)
+                uids = [meta["uid"] for meta in batch_files]
+                imap.add_labels(conn, uids, [label])
+                imap.remove_labels(conn, uids, ["\\Inbox"])
+                summary["filed"] += len(batch_files)
+            except imap.ImapError as exc:
+                summary["errors"].append(
+                    "quarantine filing in %s: %s" % (all_mail, exc)
+                )
+
+        if batch_expired:
+            try:
+                imap.select_writable(conn, all_mail)
+                summary["expired"] += imap.move_to_trash(
+                    conn, [meta["uid"] for meta in batch_expired], trash
+                )
+            except imap.ImapError as exc:
+                summary["errors"].append(
+                    "quarantine expiry in %s: %s" % (all_mail, exc)
+                )
+
+    if not dry:
+        _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary)
 
 
-def _purge_entry(
-    conn, cfg, entry, mailbox, dry, budget, run_id, summary, trash, hidden, q_entries
-):
-    query = "from:%s" % (entry[1:] if entry.startswith("@") else entry)
+def _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary):
+    """Finish the rare half-filed message: label applied, Inbox removal failed.
+
+    -label excludes these from the normal filing search, so without this they
+    would sit in Inbox until they aged out.
+    """
+    query = 'label:"%s" in:inbox' % label
     try:
-        uids = imap.search_uids(conn, query, mailbox)
+        uids = imap.search_uids(conn, query, all_mail)
     except imap.ImapError as exc:
-        summary["errors"].append("%s in %s: %s" % (entry, mailbox, exc))
+        summary["errors"].append("quarantine repair in %s: %s" % (all_mail, exc))
         return
     if not uids:
         return
-
-    candidates = uids[-FETCH_CEILING:]
     try:
-        metas = imap.fetch_meta(conn, candidates)
+        metas = imap.fetch_meta(conn, uids[:FETCH_PAGE])
     except imap.ImapError as exc:
-        summary["errors"].append("fetch in %s: %s" % (mailbox, exc))
+        summary["errors"].append("quarantine repair fetch in %s: %s" % (all_mail, exc))
         return
-
-    # Gmail's from: search is a substring match; only exact senders qualify.
-    hits = [meta for meta in metas if _covers(entry, meta["from_addr"])]
-    if not hits:
+    targets = []
+    for meta in metas:
+        if not _has_label(meta, label):
+            continue
+        if not any(
+            (name or "").lower() == "inbox" for name in meta.get("labels") or []
+        ):
+            continue
+        if quarantine.matches(meta["from_addr"], q_entries) is None:
+            continue
+        targets.append(meta)
+    if not targets:
         return
-
-    # The whitelist is a hard gate: a message that matches both lists is never
-    # touched, and the skip is counted so the run cannot look more thorough
-    # than it was.
-    kept = [meta for meta in hits if not whitelist.matches(meta["from_addr"], hidden)]
-    suppressed = len(hits) - len(kept)
-    if suppressed:
-        summary["suppressed"] += suppressed
-    if not kept:
-        return
-
-    # Quarantine wins over the blacklist per message. This matters when a
-    # blacklisted domain contains a quarantined address: that one sender is
-    # held, the rest of the domain is still deleted.
-    if q_entries:
-        held_back = [
-            meta
-            for meta in kept
-            if quarantine.matches(meta["from_addr"], q_entries) is not None
-        ]
-        if held_back:
-            summary["suppressed"] += len(held_back)
-            kept = [
-                meta
-                for meta in kept
-                if quarantine.matches(meta["from_addr"], q_entries) is None
-            ]
-        if not kept:
-            return
-    hits = kept
-
-    summary["matched"] += len(hits)
-    limited = hits[:budget]
-    if len(hits) > budget:
-        summary["capped"] = True
-
-    for meta in limited:
-        _audit(
-            cfg,
-            summary,
-            kind="message",
-            run_id=run_id,
-            dry_run=dry,
-            entry=entry,
-            folder=mailbox,
-            uid=meta["uid"],
-            msgid=meta["msgid"],
-            **{"from": meta["from_addr"]},
-            from_name=meta["from_name"],
-            subject=meta["subject"],
-            date=meta["date"],
-            action="would-trash" if dry else "trashed",
-        )
-
-    if dry:
-        summary["would_trash"] += len(limited)
-        return
-
     try:
-        imap.select_writable(conn, mailbox)
-        summary["trashed"] += imap.move_to_trash(
-            conn, [meta["uid"] for meta in limited], trash
-        )
+        imap.select_writable(conn, all_mail)
+        imap.remove_labels(conn, [meta["uid"] for meta in targets], ["\\Inbox"])
     except imap.ImapError as exc:
-        summary["errors"].append("trash in %s: %s" % (mailbox, exc))
+        summary["errors"].append("quarantine repair in %s: %s" % (all_mail, exc))
+
+
+def _purge_batches(
+    conn, cfg, entries, q_entries, hidden, mailboxes, trash, dry, summary, run_id
+):
+    """Delete blacklisted mail in batches of senders, not one sender at a time."""
+    seen = set()
+    for batch in _chunks(entries, SEARCH_BATCH):
+        if _delete_budget(cfg, summary) <= 0:
+            summary["capped"] = True
+            break
+        for mailbox in mailboxes:
+            remaining = _delete_budget(cfg, summary)
+            if remaining <= 0:
+                summary["capped"] = True
+                break
+            uids, error = _search_batch(conn, mailbox, batch)
+            if error:
+                summary["errors"].append(
+                    "blacklist search in %s: %s" % (mailbox, error)
+                )
+            if not uids:
+                continue
+            page = uids[:FETCH_PAGE]
+            try:
+                metas = imap.fetch_meta(conn, page)
+            except imap.ImapError as exc:
+                summary["errors"].append("fetch in %s: %s" % (mailbox, exc))
+                continue
+
+            hits = []
+            for meta in metas:
+                entry = blacklist.matches(meta["from_addr"], batch)
+                if entry is None:
+                    # Substring hit, not an exact sender.
+                    continue
+                key = (mailbox, meta["msgid"] or ("uid:%s" % meta["uid"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if whitelist.matches(meta["from_addr"], hidden):
+                    summary["suppressed"] += 1
+                    continue
+                if q_entries and quarantine.matches(
+                    meta["from_addr"], q_entries
+                ) is not None:
+                    summary["suppressed"] += 1
+                    continue
+                hits.append((entry, meta))
+            if not hits:
+                continue
+
+            summary["matched"] += len(hits)
+            limited = hits[:remaining]
+            if len(hits) > remaining:
+                summary["capped"] = True
+
+            for entry, meta in limited:
+                _audit(
+                    cfg,
+                    summary,
+                    kind="message",
+                    run_id=run_id,
+                    dry_run=dry,
+                    entry=entry,
+                    folder=mailbox,
+                    uid=meta["uid"],
+                    msgid=meta["msgid"],
+                    **{"from": meta["from_addr"]},
+                    from_name=meta["from_name"],
+                    subject=meta["subject"],
+                    date=meta["date"],
+                    action="would-trash" if dry else "trashed",
+                )
+
+            if dry:
+                summary["would_trash"] += len(limited)
+                continue
+
+            try:
+                imap.select_writable(conn, mailbox)
+                summary["trashed"] += imap.move_to_trash(
+                    conn, [meta["uid"] for _entry, meta in limited], trash
+                )
+            except imap.ImapError as exc:
+                summary["errors"].append("trash in %s: %s" % (mailbox, exc))

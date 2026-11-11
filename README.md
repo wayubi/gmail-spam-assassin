@@ -331,8 +331,15 @@ time) first, the `Date:` header as a fallback, future dates clamped to now.
 Days are exact 24-hour periods; months and years are calendar arithmetic
 clamped to the last valid day, so three months before 31 May is 28/29 February.
 
-The `MAX_DELETE_PER_RUN` cap (500) and a 2,000-message fetch ceiling only come
-into play when a large batch becomes due at once — for example after lowering
+Sender searches are batched: up to 25 entries share one Gmail query, so a list
+with hundreds of senders costs a few dozen searches per run rather than one per
+sender. Each batch fetches at most a page of headers, and the pass stops as soon
+as the per-run file and delete budgets are full. Everything that is acted on
+leaves the next search (deleted, or labelled and excluded by `-label`), so the
+backlog drains without a stored cursor.
+
+The `MAX_DELETE_PER_RUN` cap (500) and the 2,000-file ceiling only come into
+play when a large batch becomes due at once — for example after lowering
 `QUARANTINE_AGE` from three years to two weeks. Normal runs fetch a handful of
 due messages and leave the rest of the label alone.
 

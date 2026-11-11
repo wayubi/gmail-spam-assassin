@@ -55,6 +55,11 @@ class Age:
         singular, plural = _NAMES[self.unit]
         return "%d %s" % (self.count, singular if self.count == 1 else plural)
 
+    @property
+    def gmail(self):
+        """The same age in Gmail search syntax: 14d, 3m, 1y."""
+        return "%d%s" % (self.count, self.unit)
+
     def cutoff(self, now=None):
         """The instant before which a message counts as expired."""
         now = _utc(now)
