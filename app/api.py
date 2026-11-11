@@ -4,11 +4,13 @@ Every API route needs X-Api-Token (or Authorization: Bearer). The page itself
 is public: it only renders, and asks for the token before doing anything.
 """
 
+import hashlib
 import hmac
 import json
 import os
 import threading
 import urllib.parse
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -16,6 +18,7 @@ from . import blacklist, imap, listing, quarantine, runner, state, whitelist
 
 MAX_BODY = 64 * 1024
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_static_cache = {}
 
 
 def _int_param(query, name, default, low, high):
@@ -82,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/status":
                 return self._status(head_only)
             if method == "GET" and path == "/messages":
+                if query.get("refresh"):
+                    listing.invalidate()
                 days = _int_param(query, "days", self.cfg.list_days, 1, 365)
                 limit = _int_param(query, "limit", 200, 1, 1000)
                 folder = (query.get("folder") or ["all"])[0].lower()
@@ -89,6 +94,8 @@ class Handler(BaseHTTPRequestHandler):
                     200, listing.messages(self.cfg, days, limit, folder), head_only
                 )
             if method == "GET" and path == "/senders":
+                if query.get("refresh"):
+                    listing.invalidate()
                 days = _int_param(query, "days", self.cfg.list_days, 1, 365)
                 limit = _int_param(query, "limit", 200, 1, 1000)
                 return self._json(
@@ -100,10 +107,10 @@ class Handler(BaseHTTPRequestHandler):
                 conn = imap.connect(self.cfg.gmail_user, self.cfg.gmail_password)
                 try:
                     names = imap.list_mailboxes(conn)
-                    all_mail = imap.find_mailbox(conn, "/all mail", imap.ALL_MAIL)
-                    spam = imap.find_mailbox(conn, "/spam")
-                    trash = imap.find_mailbox(conn, "/trash")
-                    q_label = imap.find_label(conn, self.cfg.quarantine_label)
+                    all_mail = imap.match_mailbox(names, "/all mail", imap.ALL_MAIL)
+                    spam = imap.match_mailbox(names, "/spam")
+                    trash = imap.match_mailbox(names, "/trash")
+                    q_label = imap.match_label(names, self.cfg.quarantine_label)
                 finally:
                     imap.logout(conn)
                 return self._json(
@@ -147,7 +154,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not address:
                     return self._json(400, {"error": "no address in the path"}, head_only)
                 result = whitelist.remove(self.cfg.whitelist_path, [address])
-                listing.invalidate()
                 return self._json(200, result, head_only)
             if method == "GET" and path == "/quarantine":
                 return self._quarantine(head_only)
@@ -160,7 +166,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not address:
                     return self._json(400, {"error": "no address in the path"}, head_only)
                 result = quarantine.remove(self.cfg.quarantine_path, [address])
-                listing.invalidate()
                 return self._json(200, result, head_only)
             if method == "POST" and path == "/run":
                 return self._run()
@@ -171,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                     {"lines": state.tail_jsonl(self.cfg.audit_path, limit)},
                     head_only,
                 )
+            if method == "GET" and path.startswith("/runs/"):
+                return self._run_status(path[len("/runs/") :], head_only)
             return self._json(404, {"error": "not found: %s" % path}, head_only)
         except Exception as exc:  # noqa: BLE001 - always answer with JSON
             return self._json(500, {"error": str(exc)}, head_only)
@@ -200,6 +207,7 @@ class Handler(BaseHTTPRequestHandler):
             "mailboxes": ["[Gmail]/All Mail", "[Gmail]/Spam"],
             "trash_is_terminal": True,
             "max_delete_per_run": self.cfg.max_delete_per_run,
+            "max_trash_per_run": self.cfg.max_trash_per_run,
             "poll_interval": self.cfg.poll_interval,
             "list_days": self.cfg.list_days,
             "state": data,
@@ -233,7 +241,6 @@ class Handler(BaseHTTPRequestHandler):
         result = blacklist.add(
             self.cfg.blacklist_path, addresses, self.cfg.allow_freemail_domains
         )
-        listing.invalidate()
         result["count"] = len(
             blacklist.load(
                 self.cfg.blacklist_path, self.cfg.allow_freemail_domains
@@ -251,7 +258,6 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(addresses, list) or not addresses:
             return self._json(400, {"error": "expected {\"addresses\": [...]}"})
         result = blacklist.remove(self.cfg.blacklist_path, addresses)
-        listing.invalidate()
         return self._json(200, result)
 
     def _addresses(self):
@@ -284,7 +290,6 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = whitelist.add(self.cfg.whitelist_path, addresses)
-        listing.invalidate()
         result["count"] = len(whitelist.load(self.cfg.whitelist_path)[0])
         return self._json(200, result)
 
@@ -293,7 +298,6 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = whitelist.remove(self.cfg.whitelist_path, addresses)
-        listing.invalidate()
         return self._json(200, result)
 
     def _quarantine(self, head_only):
@@ -319,7 +323,6 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = quarantine.add(self.cfg.quarantine_path, addresses)
-        listing.invalidate()
         result["count"] = len(quarantine.load(self.cfg.quarantine_path)[0])
         return self._json(200, result)
 
@@ -328,7 +331,6 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             return error
         result = quarantine.remove(self.cfg.quarantine_path, addresses)
-        listing.invalidate()
         return self._json(200, result)
 
     def _run(self):
@@ -338,9 +340,38 @@ class Handler(BaseHTTPRequestHandler):
         dry = body.get("dry_run")
         if dry is not None:
             dry = bool(dry)
-        result = runner.run_purge(self.cfg, dry_run=dry, reason="api")
-        listing.invalidate()
-        return self._json(200, result)
+        if runner.busy():
+            runner.request_rerun()
+            return self._json(
+                202, {"accepted": True, "queued": True, "running": True}
+            )
+        run_id = uuid.uuid4().hex[:12]
+        cfg = self.cfg
+
+        def work():
+            try:
+                runner.run_purge(
+                    cfg, dry_run=dry, reason="api", run_id=run_id
+                )
+            except Exception:  # noqa: BLE001 - a background thread must not die loudly
+                return
+
+        threading.Thread(target=work, name="api-run", daemon=True).start()
+        return self._json(202, {"accepted": True, "run_id": run_id, "running": True})
+
+    def _run_status(self, run_id, head_only):
+        if not run_id:
+            return self._json(400, {"error": "no run id"}, head_only)
+        for record in reversed(state.tail_jsonl(self.cfg.audit_path, 5000)):
+            if record.get("kind") == "summary" and record.get("run_id") == run_id:
+                return self._json(
+                    200,
+                    {"found": True, "running": runner.busy(), "run": record},
+                    head_only,
+                )
+        return self._json(
+            200, {"found": False, "running": runner.busy()}, head_only
+        )
 
     # -- plumbing ---------------------------------------------------------
     def _authorized(self):
@@ -383,16 +414,30 @@ class Handler(BaseHTTPRequestHandler):
         return data, None
 
     def _static(self, name, head_only=False):
-        path = os.path.join(STATIC_DIR, name)
-        try:
-            with open(path, "rb") as handle:
-                payload = handle.read()
-        except OSError:
-            return self._json(404, {"error": "not found"}, head_only)
+        cached = _static_cache.get(name)
+        if cached is None:
+            path = os.path.join(STATIC_DIR, name)
+            try:
+                with open(path, "rb") as handle:
+                    payload = handle.read()
+            except OSError:
+                return self._json(404, {"error": "not found"}, head_only)
+            etag = '"%s"' % hashlib.sha1(payload).hexdigest()
+            cached = (payload, etag)
+            _static_cache[name] = cached
+        payload, etag = cached
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
         self.end_headers()
         if not head_only:
             self.wfile.write(payload)

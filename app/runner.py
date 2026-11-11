@@ -35,11 +35,22 @@ SEARCH_BATCH = 25
 # of the next search.
 FETCH_PAGE = 500
 
+# Never fetch less than this, or a page of whitelisted/lookalike hits could
+# starve the budget forever. The slack covers filtered messages in the page.
+MIN_FETCH = 100
+FETCH_SLACK = 50
+
 # Labelling is cheap but not free, and a huge burst should not hold the run
 # open for an hour. The rest is filed on the next cycle.
 FILE_CEILING = 2000
 
 _run_lock = threading.Lock()
+_rerun = threading.Event()
+
+
+def request_rerun():
+    """A trigger arrived while a run was busy; ask for one more run."""
+    _rerun.set()
 
 
 def busy():
@@ -99,17 +110,26 @@ def _has_label(meta, label):
 
 
 def _delete_budget(cfg, summary):
-    used = (
-        summary["trashed"]
-        + summary["would_trash"]
-        + summary["expired"]
-        + summary["would_expire"]
-    )
+    """Quarantine deletion budget: expiry plus old mail found while filing."""
+    used = summary["expired"] + summary["would_expire"]
     return cfg.max_delete_per_run - used
+
+
+def _trash_budget(cfg, summary):
+    """Blacklist deletion budget, independent of quarantine."""
+    used = summary["trashed"] + summary["would_trash"]
+    return cfg.max_trash_per_run - used
 
 
 def _file_budget(summary):
     return FILE_CEILING - summary["filed"] - summary["would_file"]
+
+
+def _fetch_limit(budget, page=FETCH_PAGE):
+    """How many headers are worth fetching for a given remaining budget."""
+    if budget <= 0:
+        return 0
+    return min(page, max(MIN_FETCH, budget + FETCH_SLACK))
 
 
 def _chunks(items, size):
@@ -156,20 +176,65 @@ def _audit(cfg, summary, **record):
         return False
 
 
-def run_purge(cfg, dry_run=None, reason="manual"):
-    dry = cfg.dry_run if dry_run is None else bool(dry_run)
-    if not _run_lock.acquire(blocking=False):
-        return {"ok": False, "skipped": "another run is already in progress"}
+def _audit_many(cfg, summary, records):
+    records = list(records)
+    if not records:
+        return True
+    try:
+        state.append_audit_many(cfg.audit_path, records)
+        return True
+    except OSError as exc:
+        summary["errors"].append("audit write failed: %s" % exc)
+        return False
 
-    run_id = uuid.uuid4().hex[:12]
-    started = state.now_iso()
-    started_monotonic = time.monotonic()
-    now = _now()
-    summary = {
+
+def _progress(cfg, summary, phase):
+    """Expose coarse progress while a long run is in flight."""
+    try:
+        state.update_state(
+            cfg.state_path,
+            running_phase=phase,
+            running_counts={
+                "filed": summary["filed"],
+                "expired": summary["expired"],
+                "trashed": summary["trashed"],
+                "matched": summary["matched"],
+            },
+            heartbeat=state.now_iso(),
+        )
+    except Exception:
+        pass
+
+
+def _message_record(run_id, dry, entry, folder, meta, action, label=None):
+    record = {
+        "ts": state.now_iso(),
+        "kind": "message",
+        "run_id": run_id,
+        "dry_run": dry,
+        "entry": entry,
+        "folder": folder,
+        "uid": meta["uid"],
+        "msgid": meta["msgid"],
+        "from": meta["from_addr"],
+        "from_name": meta["from_name"],
+        "subject": meta["subject"],
+        "date": meta["date"],
+        "action": action,
+    }
+    if label is not None:
+        record["label"] = label
+    return record
+
+
+def _new_summary(cfg, run_id, dry, reason, now):
+    return {
         "run_id": run_id,
         "reason": reason,
         "dry_run": dry,
-        "started": started,
+        "started": state.now_iso(),
+        "phase_s": {},
+        "imap_commands": {},
         "entries": 0,
         "mailboxes": [],
         "matched": 0,
@@ -200,6 +265,79 @@ def run_purge(cfg, dry_run=None, reason="manual"):
         "errors": [],
         "ok": False,
     }
+
+
+def _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn):
+    imap.logout(conn)
+    summary["imap_commands"] = imap.command_counts(conn)
+    _run_lock.release()
+    summary["duration_s"] = round(time.monotonic() - started_monotonic, 2)
+    summary["finished"] = state.now_iso()
+    if summary.get("incremental"):
+        # An incremental run does not scan the label; keep the last full count.
+        summary["held"] = state.read_state(cfg.state_path).get("last_held", 0)
+    try:
+        state.append_audit(cfg.audit_path, dict(summary, kind="summary"))
+        state.update_state(
+            cfg.state_path,
+            last_run=summary["finished"],
+            last_run_id=run_id,
+            last_reason=reason,
+            last_ok=summary["ok"],
+            last_dry_run=dry,
+            last_trashed=summary["trashed"],
+            last_would_trash=summary["would_trash"],
+            last_matched=summary["matched"],
+            last_suppressed=summary["suppressed"],
+            last_entries=summary["entries"],
+            last_capped=summary["capped"],
+            last_filed=summary["filed"],
+            last_would_file=summary["would_file"],
+            last_expired=summary["expired"],
+            last_would_expire=summary["would_expire"],
+            last_held=summary["held"],
+            last_stale=summary["quarantine_stale"],
+            last_quarantine_entries=summary["quarantine_entries"],
+            last_phase_s=summary["phase_s"],
+            last_imap_commands=summary["imap_commands"],
+            last_error=(summary["errors"] or [None])[-1],
+            last_duration_s=summary["duration_s"],
+            running_phase=None,
+            running_counts=None,
+            heartbeat=state.now_iso(),
+        )
+        if not dry and (
+            summary["trashed"] or summary["filed"] or summary["expired"]
+        ):
+            try:
+                from . import listing
+
+                listing.invalidate()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def run_purge(cfg, dry_run=None, reason="manual", run_id=None):
+    """Run once, plus one coalesced rerun if a trigger arrived while busy."""
+    result = _run_once(cfg, dry_run=dry_run, reason=reason, run_id=run_id)
+    if _rerun.is_set():
+        _rerun.clear()
+        result = _run_once(cfg, dry_run=dry_run, reason=reason + "-rerun", run_id=None)
+    return result
+
+
+def _run_once(cfg, dry_run=None, reason="manual", run_id=None):
+    dry = cfg.dry_run if dry_run is None else bool(dry_run)
+    if not _run_lock.acquire(blocking=False):
+        _rerun.set()
+        return {"ok": False, "skipped": "another run is already in progress"}
+
+    run_id = run_id or uuid.uuid4().hex[:12]
+    started_monotonic = time.monotonic()
+    now = _now()
+    summary = _new_summary(cfg, run_id, dry, reason, now)
     conn = None
     try:
         entries, parse_errors = blacklist.load(
@@ -242,14 +380,14 @@ def run_purge(cfg, dry_run=None, reason="manual"):
 
         conn = imap.connect(cfg.gmail_user, cfg.gmail_password)
         available = imap.list_mailboxes(conn)
-        all_mail = imap.find_mailbox(conn, "/all mail", imap.ALL_MAIL)
+        all_mail = imap.match_mailbox(available, "/all mail", imap.ALL_MAIL)
         if not all_mail:
             raise imap.ImapError(
                 "cannot find All Mail over IMAP; folders seen: %s"
                 % (", ".join(available) if available else "none")
             )
         mailboxes = [all_mail]
-        spam = imap.find_mailbox(conn, "/spam")
+        spam = imap.match_mailbox(available, "/spam")
         if spam:
             mailboxes.append(spam)
         else:
@@ -260,7 +398,7 @@ def run_purge(cfg, dry_run=None, reason="manual"):
         summary["mailboxes"] = mailboxes
         summary["folders_seen"] = available
 
-        trash = imap.find_mailbox(conn, "/trash")
+        trash = imap.match_mailbox(available, "/trash")
         if trash:
             summary["trash"] = trash
         else:
@@ -277,7 +415,7 @@ def run_purge(cfg, dry_run=None, reason="manual"):
 
         q_label = None
         if q_entries:
-            q_label = imap.find_label(conn, cfg.quarantine_label)
+            q_label = imap.match_label(available, cfg.quarantine_label)
             if not q_label:
                 # Gmail maps IMAP CREATE onto a label. Create it on demand so
                 # the list works without a manual trip through Settings; if
@@ -313,9 +451,15 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                 summary["quarantine_folder"] = q_label
 
         if q_entries and q_label:
+            phase_started = time.monotonic()
+            _progress(cfg, summary, "expire")
             _quarantine_expire(
                 conn, cfg, q_entries, hidden, q_label, trash, dry, summary, run_id, now
             )
+            summary["phase_s"]["expire"] = round(time.monotonic() - phase_started, 2)
+
+            phase_started = time.monotonic()
+            _progress(cfg, summary, "file")
             _quarantine_file(
                 conn,
                 cfg,
@@ -329,9 +473,12 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                 run_id,
                 now,
             )
+            summary["phase_s"]["file"] = round(time.monotonic() - phase_started, 2)
 
         active = [entry for entry in entries if entry not in skipped]
         if active:
+            phase_started = time.monotonic()
+            _progress(cfg, summary, "purge")
             _purge_batches(
                 conn,
                 cfg,
@@ -344,6 +491,8 @@ def run_purge(cfg, dry_run=None, reason="manual"):
                 summary,
                 run_id,
             )
+            summary["phase_s"]["purge"] = round(time.monotonic() - phase_started, 2)
+        _progress(cfg, summary, None)
         summary["ok"] = True
     except Exception as exc:  # noqa: BLE001 - the run must always be recorded
         summary["ok"] = False
@@ -357,38 +506,224 @@ def run_purge(cfg, dry_run=None, reason="manual"):
             error=str(exc),
         )
     finally:
-        imap.logout(conn)
-        _run_lock.release()
-        summary["duration_s"] = round(time.monotonic() - started_monotonic, 2)
-        summary["finished"] = state.now_iso()
-        try:
-            state.append_audit(cfg.audit_path, dict(summary, kind="summary"))
-            state.update_state(
-                cfg.state_path,
-                last_run=summary["finished"],
-                last_run_id=run_id,
-                last_reason=reason,
-                last_ok=summary["ok"],
-                last_dry_run=dry,
-                last_trashed=summary["trashed"],
-                last_would_trash=summary["would_trash"],
-                last_matched=summary["matched"],
-                last_suppressed=summary["suppressed"],
-                last_entries=summary["entries"],
-                last_capped=summary["capped"],
-                last_filed=summary["filed"],
-                last_would_file=summary["would_file"],
-                last_expired=summary["expired"],
-                last_would_expire=summary["would_expire"],
-                last_held=summary["held"],
-                last_stale=summary["quarantine_stale"],
-                last_quarantine_entries=summary["quarantine_entries"],
-                last_error=(summary["errors"] or [None])[-1],
-                last_duration_s=summary["duration_s"],
-                heartbeat=state.now_iso(),
+        _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn)
+    return summary
+
+
+def run_new_mail(cfg, since_uid, uidvalidity, dry_run=None, reason="idle"):
+    """Handle only the UIDs that arrived in INBOX since the last IDLE connect.
+
+    Returns `fallback: True` when the cheap path cannot be trusted (UIDVALIDITY
+    changed, too many arrivals, missing folder/label); the caller then runs the
+    full batched sweep.
+    """
+    dry = cfg.dry_run if dry_run is None else bool(dry_run)
+    if not _run_lock.acquire(blocking=False):
+        _rerun.set()
+        return {"ok": False, "skipped": "another run is already in progress"}
+
+    run_id = uuid.uuid4().hex[:12]
+    now = _now()
+    summary = _new_summary(cfg, run_id, dry, reason, now)
+    summary["incremental"] = True
+    started_monotonic = time.monotonic()
+    conn = None
+    try:
+        entries, parse_errors = blacklist.load(
+            cfg.blacklist_path, cfg.allow_freemail_domains
+        )
+        hidden, whitelist_errors = whitelist.load(cfg.whitelist_path)
+        q_entries, q_errors = quarantine.load(cfg.quarantine_path)
+        summary["entries"] = len(entries)
+        summary["blacklist_errors"] = parse_errors
+        summary["whitelisted"] = len(hidden)
+        summary["whitelist_errors"] = whitelist_errors
+        summary["quarantine_entries"] = len(q_entries)
+        summary["quarantine_errors"] = q_errors
+
+        if since_uid is None:
+            summary["fallback"] = True
+            summary["ok"] = True
+            return summary
+
+        conn = imap.connect(cfg.gmail_user, cfg.gmail_password)
+        names = imap.list_mailboxes(conn)
+        trash = imap.match_mailbox(names, "/trash")
+        q_label = (
+            imap.match_label(names, cfg.quarantine_label) if q_entries else None
+        )
+        if q_entries and not q_label:
+            summary["fallback"] = True
+            summary["ok"] = True
+            return summary
+
+        imap.select(conn, imap.INBOX, readonly=True)
+        summary["uidvalidity"] = conn.uidvalidity
+        summary["uidnext"] = conn.uidnext
+        if (
+            uidvalidity is not None
+            and conn.uidvalidity is not None
+            and int(uidvalidity) != int(conn.uidvalidity)
+        ):
+            summary["fallback"] = True
+            summary["ok"] = True
+            summary["note"] = "UIDVALIDITY changed; full sweep"
+            return summary
+
+        uids = imap.search_since(conn, imap.INBOX, int(since_uid))
+        if not uids:
+            summary["uidnext"] = int(since_uid)
+            summary["ok"] = True
+            return summary
+        if len(uids) > FETCH_PAGE:
+            summary["fallback"] = True
+            summary["ok"] = True
+            summary["note"] = "more than %d new messages; full sweep" % FETCH_PAGE
+            return summary
+
+        metas = imap.fetch_meta(conn, uids)
+        files = []
+        expires = []
+        trashes = []
+        for meta in metas:
+            if meta["uid"] < int(since_uid):
+                continue
+            labels = {name.lower() for name in meta.get("labels") or []}
+            if "trash" in labels or "spam" in labels:
+                continue
+            if whitelist.matches(meta["from_addr"], hidden):
+                summary["suppressed"] += 1
+                continue
+            held = quarantine.matches(meta["from_addr"], q_entries)
+            if held:
+                state_flag = cfg.quarantine_age.expired(meta["date"], now)
+                if state_flag is None:
+                    summary["undated"] += 1
+                    continue
+                if state_flag:
+                    expires.append((held, meta))
+                else:
+                    files.append((held, meta))
+                continue
+            entry = blacklist.matches(meta["from_addr"], entries)
+            if entry:
+                trashes.append((entry, meta))
+
+        if expires and cfg.quarantine_abort_over and len(expires) > cfg.quarantine_abort_over:
+            summary["warnings"].append(
+                "quarantine: %d new messages are already past %s but "
+                "QUARANTINE_ABORT_OVER=%d; they were left in place."
+                % (len(expires), cfg.quarantine_age.text, cfg.quarantine_abort_over)
             )
-        except Exception:
-            pass
+            expires = []
+        delete_left = _delete_budget(cfg, summary)
+        if len(expires) > delete_left:
+            expires = expires[:delete_left]
+            summary["capped"] = True
+        file_left = _file_budget(summary)
+        if len(files) > file_left:
+            files = files[:file_left]
+            summary["capped"] = True
+        trash_left = _trash_budget(cfg, summary)
+        if len(trashes) > trash_left:
+            trashes = trashes[:trash_left]
+            summary["capped"] = True
+
+        if (expires or trashes) and not trash:
+            summary["fallback"] = True
+            summary["ok"] = True
+            summary["note"] = "Trash is not visible; full sweep"
+            return summary
+
+        records = []
+        for entry, meta in files:
+            records.append(
+                _message_record(
+                    run_id,
+                    dry,
+                    entry,
+                    imap.INBOX,
+                    meta,
+                    "would-quarantine" if dry else "quarantined",
+                    label=q_label,
+                )
+            )
+        for entry, meta in expires:
+            records.append(
+                _message_record(
+                    run_id,
+                    dry,
+                    entry,
+                    imap.INBOX,
+                    meta,
+                    "would-expire" if dry else "expired",
+                    label=q_label,
+                )
+            )
+        for entry, meta in trashes:
+            records.append(
+                _message_record(
+                    run_id,
+                    dry,
+                    entry,
+                    imap.INBOX,
+                    meta,
+                    "would-trash" if dry else "trashed",
+                )
+            )
+        _audit_many(cfg, summary, records)
+
+        summary["matched"] = len(trashes)
+        summary["uidnext"] = max(uids) + 1
+        if dry:
+            summary["would_file"] += len(files)
+            summary["would_expire"] += len(expires)
+            summary["would_trash"] += len(trashes)
+            summary["ok"] = True
+            return summary
+
+        if files:
+            try:
+                imap.select_writable(conn, imap.INBOX)
+                ids = [meta["uid"] for _entry, meta in files]
+                imap.add_labels(conn, ids, [q_label])
+                imap.remove_labels(conn, ids, ["\\Inbox"])
+                summary["filed"] += len(files)
+            except imap.ImapError as exc:
+                summary["errors"].append("incremental filing: %s" % exc)
+        if expires:
+            try:
+                imap.select_writable(conn, imap.INBOX)
+                summary["expired"] += imap.move_to_trash(
+                    conn, [meta["uid"] for _entry, meta in expires], trash
+                )
+            except imap.ImapError as exc:
+                summary["errors"].append("incremental expiry: %s" % exc)
+        if trashes:
+            try:
+                imap.select_writable(conn, imap.INBOX)
+                summary["trashed"] += imap.move_to_trash(
+                    conn, [meta["uid"] for _entry, meta in trashes], trash
+                )
+            except imap.ImapError as exc:
+                summary["errors"].append("incremental trash: %s" % exc)
+        summary["ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        summary["ok"] = False
+        summary["errors"].append(str(exc))
+        _audit(
+            cfg,
+            summary,
+            kind="error",
+            run_id=run_id,
+            reason=reason,
+            error=str(exc),
+        )
+    finally:
+        summary["phase_s"]["incremental"] = round(
+            time.monotonic() - started_monotonic, 2
+        )
+        _finish(cfg, summary, run_id, dry, reason, started_monotonic, conn)
     return summary
 
 
@@ -422,8 +757,13 @@ def _quarantine_expire(
 
     if not due:
         return
+    remaining = _delete_budget(cfg, summary)
+    if remaining <= 0:
+        summary["capped"] = True
+        return
+    limit = _fetch_limit(remaining, FETCH_CEILING)
     try:
-        metas = imap.fetch_meta(conn, due[:FETCH_CEILING])
+        metas = imap.fetch_meta(conn, due[:limit])
     except imap.ImapError as exc:
         summary["errors"].append("quarantine fetch in %s: %s" % (label, exc))
         return
@@ -489,24 +829,22 @@ def _quarantine_expire(
         summary["capped"] = True
 
     action = "would-expire" if dry else "expired"
-    for meta in limited:
-        _audit(
-            cfg,
-            summary,
-            kind="message",
-            run_id=run_id,
-            dry_run=dry,
-            entry=quarantine.matches(meta["from_addr"], q_entries),
-            folder=label,
-            uid=meta["uid"],
-            msgid=meta["msgid"],
-            **{"from": meta["from_addr"]},
-            from_name=meta["from_name"],
-            subject=meta["subject"],
-            date=meta["date"],
-            label=label,
-            action=action,
-        )
+    _audit_many(
+        cfg,
+        summary,
+        [
+            _message_record(
+                run_id,
+                dry,
+                quarantine.matches(meta["from_addr"], q_entries),
+                label,
+                meta,
+                action,
+                label=label,
+            )
+            for meta in limited
+        ],
+    )
 
     if dry:
         summary["would_expire"] += len(limited)
@@ -554,7 +892,15 @@ def _quarantine_file(
                 )
             if not uids:
                 continue
-            page = uids[:FETCH_PAGE] if oldest_first else uids[-FETCH_PAGE:]
+            budget = (
+                _delete_budget(cfg, summary)
+                if criterion.startswith("older")
+                else _file_budget(summary)
+            )
+            limit = _fetch_limit(budget, FETCH_PAGE)
+            if limit <= 0:
+                continue
+            page = uids[:limit] if oldest_first else uids[-limit:]
             try:
                 metas = imap.fetch_meta(conn, page)
             except imap.ImapError as exc:
@@ -607,42 +953,34 @@ def _quarantine_file(
         if not batch_files and not batch_expired:
             continue
 
-        for meta in batch_files:
-            _audit(
-                cfg,
-                summary,
-                kind="message",
-                run_id=run_id,
-                dry_run=dry,
-                entry=quarantine.matches(meta["from_addr"], q_entries),
-                folder=all_mail,
-                uid=meta["uid"],
-                msgid=meta["msgid"],
-                **{"from": meta["from_addr"]},
-                from_name=meta["from_name"],
-                subject=meta["subject"],
-                date=meta["date"],
-                label=label,
-                action="would-quarantine" if dry else "quarantined",
-            )
-        for meta in batch_expired:
-            _audit(
-                cfg,
-                summary,
-                kind="message",
-                run_id=run_id,
-                dry_run=dry,
-                entry=quarantine.matches(meta["from_addr"], q_entries),
-                folder=all_mail,
-                uid=meta["uid"],
-                msgid=meta["msgid"],
-                **{"from": meta["from_addr"]},
-                from_name=meta["from_name"],
-                subject=meta["subject"],
-                date=meta["date"],
-                label=label,
-                action="would-expire" if dry else "expired",
-            )
+        _audit_many(
+            cfg,
+            summary,
+            [
+                _message_record(
+                    run_id,
+                    dry,
+                    quarantine.matches(meta["from_addr"], q_entries),
+                    all_mail,
+                    meta,
+                    "would-quarantine" if dry else "quarantined",
+                    label=label,
+                )
+                for meta in batch_files
+            ]
+            + [
+                _message_record(
+                    run_id,
+                    dry,
+                    quarantine.matches(meta["from_addr"], q_entries),
+                    all_mail,
+                    meta,
+                    "would-expire" if dry else "expired",
+                    label=label,
+                )
+                for meta in batch_expired
+            ],
+        )
 
         if dry:
             summary["would_file"] += len(batch_files)
@@ -671,6 +1009,8 @@ def _quarantine_file(
                 summary["errors"].append(
                     "quarantine expiry in %s: %s" % (all_mail, exc)
                 )
+
+        _progress(cfg, summary, "file")
 
     if not dry:
         _quarantine_repair(conn, cfg, q_entries, label, all_mail, summary)
@@ -721,11 +1061,11 @@ def _purge_batches(
     """Delete blacklisted mail in batches of senders, not one sender at a time."""
     seen = set()
     for batch in _chunks(entries, SEARCH_BATCH):
-        if _delete_budget(cfg, summary) <= 0:
+        if _trash_budget(cfg, summary) <= 0:
             summary["capped"] = True
             break
         for mailbox in mailboxes:
-            remaining = _delete_budget(cfg, summary)
+            remaining = _trash_budget(cfg, summary)
             if remaining <= 0:
                 summary["capped"] = True
                 break
@@ -736,7 +1076,10 @@ def _purge_batches(
                 )
             if not uids:
                 continue
-            page = uids[:FETCH_PAGE]
+            limit = _fetch_limit(remaining, FETCH_PAGE)
+            if limit <= 0:
+                continue
+            page = uids[:limit]
             try:
                 metas = imap.fetch_meta(conn, page)
             except imap.ImapError as exc:
@@ -770,23 +1113,21 @@ def _purge_batches(
             if len(hits) > remaining:
                 summary["capped"] = True
 
-            for entry, meta in limited:
-                _audit(
-                    cfg,
-                    summary,
-                    kind="message",
-                    run_id=run_id,
-                    dry_run=dry,
-                    entry=entry,
-                    folder=mailbox,
-                    uid=meta["uid"],
-                    msgid=meta["msgid"],
-                    **{"from": meta["from_addr"]},
-                    from_name=meta["from_name"],
-                    subject=meta["subject"],
-                    date=meta["date"],
-                    action="would-trash" if dry else "trashed",
-                )
+            _audit_many(
+                cfg,
+                summary,
+                [
+                    _message_record(
+                        run_id,
+                        dry,
+                        entry,
+                        mailbox,
+                        meta,
+                        "would-trash" if dry else "trashed",
+                    )
+                    for entry, meta in limited
+                ],
+            )
 
             if dry:
                 summary["would_trash"] += len(limited)
@@ -799,3 +1140,4 @@ def _purge_batches(
                 )
             except imap.ImapError as exc:
                 summary["errors"].append("trash in %s: %s" % (mailbox, exc))
+            _progress(cfg, summary, "purge")

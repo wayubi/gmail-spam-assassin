@@ -76,6 +76,8 @@ def _idle_loop(cfg, stop):
                 heartbeat=state.now_iso(),
             )
             log.info("watching INBOX with IDLE")
+            last_uidnext = watcher.uidnext
+            last_uidvalidity = watcher.uidvalidity
             while not stop.is_set():
                 # Cap the wait so the hourly reconciliation sweep is actually
                 # hourly. A plain 29-minute IDLE only checks the clock every
@@ -88,7 +90,29 @@ def _idle_loop(cfg, stop):
                 result = watcher.idle(min(29 * 60, until_sweep))
                 if result == "exists":
                     stop.wait(3)  # let a burst finish arriving, then one sweep
-                    _log_summary("idle", runner.run_purge(cfg, reason="idle"))
+                    try:
+                        incremental = runner.run_new_mail(
+                            cfg,
+                            last_uidnext,
+                            last_uidvalidity,
+                            reason="idle",
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("incremental run failed")
+                        incremental = {"fallback": True}
+                    if incremental.get("fallback"):
+                        result = runner.run_purge(cfg, reason="idle")
+                        if incremental.get("uidvalidity"):
+                            last_uidvalidity = incremental["uidvalidity"]
+                        if not result.get("dry_run") and incremental.get("uidnext"):
+                            last_uidnext = incremental["uidnext"]
+                    else:
+                        result = incremental
+                        if not result.get("dry_run") and result.get("uidnext"):
+                            last_uidnext = result["uidnext"]
+                        if result.get("uidvalidity"):
+                            last_uidvalidity = result["uidvalidity"]
+                    _log_summary("idle", result)
                     last_sweep = time.monotonic()
                 else:
                     watcher.noop()

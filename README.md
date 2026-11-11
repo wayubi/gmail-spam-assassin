@@ -64,7 +64,10 @@ says so; a dry run warns and continues.
 | Trash is terminal | `[Gmail]/Trash` is only ever a `COPY` destination, never opened for writing, so a mistake is recoverable 30 days |
 | No expunge, ever | `EXPUNGE` / `\Deleted` are never issued, so Gmail's account-level expunge setting cannot turn this into a permanent delete |
 | Fails closed without Trash | if `[Gmail]/Trash` is not visible over IMAP, a live run deletes nothing and reports why |
-| `MAX_DELETE_PER_RUN=500` | a bad blacklist line cannot wipe the mailbox in one cycle |
+| `MAX_DELETE_PER_RUN=500` | quarantine (expiry plus old-at-filing) cannot delete more than this per cycle |
+| `MAX_TRASH_PER_RUN=200` | the blacklist has its own cap, so quarantine cannot starve it |
+| Batched searches | up to 25 senders share one Gmail query; a run costs a few dozen searches, not one per sender |
+| Bounded fetch | only a page of headers per batch, and the pass stops when the action budgets are full |
 | Whitelist wins | a whitelist entry beats both delete lists; nothing from it is deleted, and the skip is counted |
 | Quarantine wins per message | if a blacklisted domain contains a quarantined address, that sender is held and the rest of the domain is still trashed |
 | Quarantine is reversible until expiry | filing is an `X-GM-LABELS` edit (label + remove Inbox), never a delete |
@@ -197,7 +200,8 @@ Five tabs: **Recent mail** (per-message rows, subject + sender), **Senders**
 **Blacklist** (add and remove), **Whitelist** (senders you never want deleted,
 hidden from both lists), and **Quarantine** (label, hold, then delete). Buttons
 on the mail and sender rows add the selection to any of the three lists. "Run
-now" triggers a cycle and shows the result.
+now" starts the run in the background and polls for the summary, so a long run
+does not hold the HTTP request (or the browser) open.
 
 ### CLI
 
@@ -216,8 +220,12 @@ docker exec gmail-spam-assassin spam-assassin hold someone@example.com @spam.exa
 docker exec gmail-spam-assassin spam-assassin release someone@example.com
 docker exec gmail-spam-assassin spam-assassin mailboxes
 docker exec gmail-spam-assassin spam-assassin run --dry-run
+docker exec gmail-spam-assassin spam-assassin run --live --no-wait
 docker exec gmail-spam-assassin spam-assassin audit --limit 20
 ```
+
+`run` waits for the run to finish and prints its summary. `--no-wait` returns
+as soon as the run is accepted; `status` shows the rest.
 
 Add `--json` for raw output.
 
@@ -251,8 +259,8 @@ curl -s -H "$H" "$B/audit?limit=20" | jq -r '.lines[] | [.ts,.action,.from,.subj
 | Route | Purpose |
 |---|---|
 | `GET /status` | mode, dry-run, watcher state, last run, blacklist size |
-| `GET /messages?days=&limit=&folder=all\|inbox\|spam` | per-message rows |
-| `GET /senders?days=&limit=` | grouped by address with counts |
+| `GET /messages?days=&limit=&folder=all\|inbox\|spam` | per-message rows; add `&refresh=1` to bypass the raw cache |
+| `GET /senders?days=&limit=` | grouped by address; add `&refresh=1` to bypass the raw cache |
 | `GET /blacklist` | entries plus any rejected lines |
 | `GET /whitelist` | same, for the never-delete / hide list |
 | `GET /quarantine` | entries, plus the label, age and current cutoff |
@@ -266,7 +274,8 @@ curl -s -H "$H" "$B/audit?limit=20" | jq -r '.lines[] | [.ts,.action,.from,.subj
 | `POST /quarantine` | add to the hold-then-delete list |
 | `POST /quarantine/remove` | `{"addresses": [...]}` |
 | `DELETE /quarantine/<address>` | remove one (URL-encoded) |
-| `POST /run` | `{"dry_run": true\|false}`, defaults to `DRY_RUN` |
+| `POST /run` | `{"dry_run": true\|false}`, defaults to `DRY_RUN`; returns `202` with a `run_id` immediately |
+| `GET /runs/<run_id>` | `{"found": true, "run": {...}}` once the run summary exists |
 | `GET /audit?limit=` | recent audit records |
 
 ---
@@ -338,8 +347,10 @@ as the per-run file and delete budgets are full. Everything that is acted on
 leaves the next search (deleted, or labelled and excluded by `-label`), so the
 backlog drains without a stored cursor.
 
-The `MAX_DELETE_PER_RUN` cap (500) and the 2,000-file ceiling only come into
-play when a large batch becomes due at once — for example after lowering
+The `MAX_DELETE_PER_RUN` cap (500) covers quarantine expiry and old mail found
+while filing. The blacklist has a separate `MAX_TRASH_PER_RUN` cap (200), so
+neither can starve the other. The 2,000-file ceiling only comes into play when
+a large batch becomes due at once — for example after lowering
 `QUARANTINE_AGE` from three years to two weeks. Normal runs fetch a handful of
 due messages and leave the rest of the label alone.
 
@@ -384,7 +395,8 @@ Compose merges automatically.
 | `MODE` | `idle` | `idle` (push) or `poll` (every `POLL_INTERVAL`) |
 | `POLL_INTERVAL` | `900` | seconds, poll mode only |
 | `DRY_RUN` | `true` | `false` to actually move mail to Trash |
-| `MAX_DELETE_PER_RUN` | `500` | messages per cycle |
+| `MAX_DELETE_PER_RUN` | `500` | quarantine deletions per cycle |
+| `MAX_TRASH_PER_RUN` | `200` | blacklist deletions per cycle |
 | `LIST_DAYS` | `30` | default window for listing |
 | `ALLOW_FREEMAIL_DOMAINS` | `false` | allow `@gmail.com` and friends |
 | `QUARANTINE_LABEL` | `Quarantine` | shared Gmail label for held mail |
@@ -397,12 +409,15 @@ Compose merges automatically.
 `MODE=idle` holds one connection on `INBOX` and reacts to `EXISTS` within
 seconds. It re-issues IDLE every 29 minutes (Gmail drops it at 30), backs off
 exponentially on disconnect, and still runs a **full reconciliation sweep every
-hour** plus one on startup. The sweep is what makes IDLE safe: a missed event
-heals itself. `MODE=poll` is the fallback and uses a short connection every
+hour** plus one on startup. On an `EXISTS` the incremental path fetches only the
+new INBOX UIDs and matches them locally against the lists; the hourly sweep is
+the safety net for mail that never reaches INBOX, such as filtered/archived
+mail and Spam. `MODE=poll` is the fallback and uses a short connection every
 `POLL_INTERVAL`.
 
-Listing and API calls use their own short-lived connections, so a browser
-request cannot stall the watcher.
+Listing uses one shared read-only connection and caches raw headers. Editing a
+list only changes the flags computed at response time, so it does not trigger a
+new IMAP fetch; **Refresh** forces one.
 
 ---
 
@@ -423,7 +438,7 @@ State lives in `./data`:
 | `blacklist.txt` | the list, hand-editable |
 | `whitelist.txt` | never-delete / hidden senders, hand-editable |
 | `quarantine.txt` | label-then-delete senders, hand-editable |
-| `audit.jsonl` | one line per matched message and one per run; metadata only |
+| `audit.jsonl` | one line per matched message and one per run; metadata only. Rotates at 20 MB, keeping 3 older files |
 | `state.json` | last run, counts, watcher state, heartbeat |
 
 Healthcheck: the main process writes a heartbeat every 60 s; the container is

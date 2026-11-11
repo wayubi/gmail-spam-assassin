@@ -80,6 +80,7 @@ class Config:
     poll_interval: int
     dry_run: bool
     max_delete_per_run: int
+    max_trash_per_run: int
     list_days: int
     allow_freemail_domains: bool
     quarantine_label: str
@@ -127,6 +128,8 @@ class Config:
             out.append("MODE must be 'idle' or 'poll'")
         if self.max_delete_per_run < 1:
             out.append("MAX_DELETE_PER_RUN must be at least 1")
+        if self.max_trash_per_run < 1:
+            out.append("MAX_TRASH_PER_RUN must be at least 1")
         if self.quarantine_age_error:
             out.append(self.quarantine_age_error)
         label_problem = _label_problem(self.quarantine_label)
@@ -158,6 +161,7 @@ def load():
         poll_interval=max(60, _int("POLL_INTERVAL", 900)),
         dry_run=_bool("DRY_RUN", True),
         max_delete_per_run=max(1, _int("MAX_DELETE_PER_RUN", 500)),
+        max_trash_per_run=max(1, _int("MAX_TRASH_PER_RUN", 200)),
         list_days=max(1, min(365, _int("LIST_DAYS", 30))),
         allow_freemail_domains=_bool("ALLOW_FREEMAIL_DOMAINS", False),
         quarantine_label=_str("QUARANTINE_LABEL", "Quarantine") or "Quarantine",

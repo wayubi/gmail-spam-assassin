@@ -19,9 +19,11 @@ Every hit is verified against the parsed From header before anything is
 touched, because Gmail's from: search is a substring match.
 """
 
+import collections
 import email
 import imaplib
 import re
+import time
 from datetime import timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr
@@ -62,6 +64,7 @@ def quote(value):
 
 def connect(user, password, timeout=60):
     conn = imaplib.IMAP4_SSL(HOST, PORT, timeout=timeout)
+    _instrument(conn)
     try:
         conn.login(user, password)
     except imaplib.IMAP4.error as exc:
@@ -89,6 +92,44 @@ def connect(user, password, timeout=60):
     return conn
 
 
+def _instrument(conn):
+    """Count IMAP verbs on this connection, for the run summary.
+
+    The wrapper is deliberately tiny: it records the verb and delegates. It is
+    read-only bookkeeping and cannot change protocol behaviour.
+    """
+    conn.command_counts = collections.Counter()
+    conn.selected_state = None
+    conn.uidvalidity = None
+    conn.uidnext = None
+
+    original_uid = conn.uid
+
+    def counted_uid(command, *args, **kwargs):
+        verb = str(command).split()[0].upper() if command else "?"
+        conn.command_counts["UID " + verb] += 1
+        return original_uid(command, *args, **kwargs)
+
+    conn.uid = counted_uid
+    for name in (
+        "select",
+        "list",
+        "status",
+        "login",
+        "logout",
+        "close",
+        "capability",
+        "create",
+    ):
+        original = getattr(conn, name)
+
+        def counted(*args, _name=name, _fn=original, **kwargs):
+            conn.command_counts[_name.upper()] += 1
+            return _fn(*args, **kwargs)
+
+        setattr(conn, name, counted)
+
+
 def _capabilities(conn):
     """Capabilities as advertised *now*.
 
@@ -114,15 +155,45 @@ def _capabilities(conn):
 
 
 def select(conn, mailbox, readonly=True):
+    state = getattr(conn, "selected_state", None)
+    if state and state[0] == mailbox:
+        # Already open in this mode, or open read-write and a read-only view
+        # was requested. Staying read-write is safe: SEARCH and BODY.PEEK do
+        # not set \Seen; only the explicit STORE/COPY calls change mail.
+        if not state[1] or readonly:
+            return
     typ, data = conn.select(quote(mailbox), readonly=readonly)
     if typ != "OK":
+        conn.selected_state = None
+        conn._folder_names = None
         names = list_mailboxes(conn)
         detail = ("; folders available: %s" % ", ".join(names)) if names else ""
         raise ImapError("cannot open %s: %s%s" % (mailbox, data, detail))
+    conn.selected_state = (mailbox, readonly)
+    conn.uidvalidity = _untagged_int(conn, "UIDVALIDITY")
+    conn.uidnext = _untagged_int(conn, "UIDNEXT")
 
 
-def list_mailboxes(conn):
-    """Names from LIST, unquoted. Empty list means LIST itself failed."""
+def _untagged_int(conn, name):
+    values = getattr(conn, "untagged_responses", {}).get(name) or []
+    for value in values:
+        text = value.decode("ascii", "replace") if isinstance(value, bytes) else str(value)
+        match = re.search(r"(\d+)", text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def list_mailboxes(conn, refresh=False):
+    """Names from LIST, unquoted. Cached on the connection for an hour.
+
+    An empty list means LIST itself failed; that result is not cached, so the
+    next call retries. `create_label` and a failed SELECT invalidate the cache.
+    """
+    now = time.monotonic()
+    cached = getattr(conn, "_folder_names", None)
+    if cached and not refresh and now - cached[0] < 3600:
+        return list(cached[1])
     try:
         typ, data = conn.list()
     except Exception:
@@ -141,15 +212,12 @@ def list_mailboxes(conn):
         if name.startswith('"') and name.endswith('"'):
             name = name[1:-1]
         names.append(name)
-    return names
+    conn._folder_names = (now, names)
+    return list(names)
 
 
-def find_mailbox(conn, suffix, default=None):
-    """Resolve a Gmail special folder, or None if the account does not expose it.
-
-    `default` is only used when LIST itself is unavailable (older servers).
-    """
-    names = list_mailboxes(conn)
+def match_mailbox(names, suffix, default=None):
+    """Resolve a Gmail special folder from an existing LIST result."""
     if not names:
         return default
     target = suffix.lower()
@@ -169,17 +237,11 @@ def find_mailbox(conn, suffix, default=None):
     return None
 
 
-def find_label(conn, name):
-    """Resolve a user-created Gmail label as an IMAP folder, or None.
-
-    Exact match first, then case-insensitive. System folders are never
-    returned: pointing QUARANTINE_LABEL at Trash, Spam or All Mail would turn a
-    reversible hold into something very different.
-    """
+def match_label(names, name):
+    """Resolve a user-created Gmail label from an existing LIST result."""
     wanted = (name or "").strip()
     if not wanted:
         return None
-    names = list_mailboxes(conn)
     for candidate in names:
         if candidate == wanted:
             return candidate
@@ -187,6 +249,19 @@ def find_label(conn, name):
         if candidate.lower() == wanted.lower():
             return candidate
     return None
+
+
+def find_mailbox(conn, suffix, default=None):
+    """Resolve a Gmail special folder, or None if the account does not expose it.
+
+    `default` is only used when LIST itself is unavailable (older servers).
+    """
+    return match_mailbox(list_mailboxes(conn), suffix, default)
+
+
+def find_label(conn, name):
+    """Resolve a user-created Gmail label as an IMAP folder, or None."""
+    return match_label(list_mailboxes(conn), name)
 
 
 def create_label(conn, name):
@@ -198,6 +273,7 @@ def create_label(conn, name):
     typ, data = conn.create(quote(name))
     if typ != "OK":
         raise ImapError("CREATE %r failed: %s" % (name, data))
+    conn._folder_names = None
     return find_label(conn, name)
 
 
@@ -269,6 +345,23 @@ def fetch_meta(conn, uids, chunk_size=100):
             raise ImapError("fetch failed: %s" % (data,))
         rows.extend(_parse_fetch(data))
     return rows
+
+
+def search_since(conn, mailbox, since_uid):
+    """UIDs at or above `since_uid`, newest last. One search, no headers."""
+    select(conn, mailbox, readonly=True)
+    typ, data = conn.uid("SEARCH", "UID", "%d:*" % int(since_uid))
+    if typ != "OK":
+        raise ImapError("search UID %s:* failed in %s: %s" % (since_uid, mailbox, data))
+    uids = []
+    for chunk in data:
+        if chunk:
+            uids.extend(chunk.split())
+    return sorted(uid for uid in (int(value) for value in uids) if uid >= since_uid)
+
+
+def command_counts(conn):
+    return dict(getattr(conn, "command_counts", {}))
 
 
 def _parse_fetch(data):
@@ -376,7 +469,25 @@ def select_writable(conn, mailbox):
     select(conn, mailbox, readonly=False)
 
 
-def _store_labels(conn, uids, item, labels, chunk_size=50):
+def compress_uids(uids):
+    """Compress a UID list into an IMAP sequence set: 101:180,190,200:240."""
+    numbers = sorted({int(uid) for uid in uids})
+    parts = []
+    start = previous = None
+    for number in numbers:
+        if start is None:
+            start = previous = number
+        elif number == previous + 1:
+            previous = number
+        else:
+            parts.append(str(start) if start == previous else "%d:%d" % (start, previous))
+            start = previous = number
+    if start is not None:
+        parts.append(str(start) if start == previous else "%d:%d" % (start, previous))
+    return ",".join(parts)
+
+
+def _store_labels(conn, uids, item, labels, chunk_size=500):
     """Issue +X-GM-LABELS / -X-GM-LABELS for a set of UIDs.
 
     This is label editing, not deletion: it cannot move anything to Trash or
@@ -390,7 +501,7 @@ def _store_labels(conn, uids, item, labels, chunk_size=50):
     values = "(" + " ".join(quote(label) for label in labels) + ")"
     for start in range(0, len(uids), chunk_size):
         chunk = uids[start : start + chunk_size]
-        uidset = ",".join(str(uid) for uid in chunk)
+        uidset = compress_uids(chunk)
         typ, data = conn.uid("STORE", uidset, item, values)
         if typ != "OK":
             raise ImapError(
@@ -400,15 +511,15 @@ def _store_labels(conn, uids, item, labels, chunk_size=50):
     return total
 
 
-def add_labels(conn, uids, labels, chunk_size=50):
+def add_labels(conn, uids, labels, chunk_size=500):
     return _store_labels(conn, uids, "+X-GM-LABELS", labels, chunk_size)
 
 
-def remove_labels(conn, uids, labels, chunk_size=50):
+def remove_labels(conn, uids, labels, chunk_size=500):
     return _store_labels(conn, uids, "-X-GM-LABELS", labels, chunk_size)
 
 
-def move_to_trash(conn, uids, trash, chunk_size=50):
+def move_to_trash(conn, uids, trash, chunk_size=500):
     """Move messages to Trash by COPYing them into the Trash mailbox.
 
     Gmail keeps one copy of each message and treats folders as labels, so a
@@ -422,7 +533,7 @@ def move_to_trash(conn, uids, trash, chunk_size=50):
     uids = list(uids)
     for start in range(0, len(uids), chunk_size):
         chunk = uids[start : start + chunk_size]
-        uidset = ",".join(str(uid) for uid in chunk)
+        uidset = compress_uids(chunk)
         typ, data = conn.uid("COPY", uidset, quote(trash))
         if typ != "OK":
             raise ImapError("COPY to %s failed for %s: %s" % (trash, uidset, data))

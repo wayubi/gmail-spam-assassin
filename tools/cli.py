@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -84,6 +85,12 @@ def show_status(data):
              state.get("last_held"), state.get("last_capped")))
     if state.get("last_error"):
         print("last error    %s" % state["last_error"])
+    if state.get("last_phase_s"):
+        print("phases        %s" % " ".join(
+            "%s=%ss" % (k, v) for k, v in sorted(state["last_phase_s"].items())))
+    if state.get("last_imap_commands"):
+        print("imap          %s" % " ".join(
+            "%s=%s" % (k, v) for k, v in sorted(state["last_imap_commands"].items())))
     for error in data.get("blacklist_errors") or []:
         print("blacklist line %s: %s (%s)" % (error["line"], error["entry"], error["reason"]))
     for error in data.get("quarantine_errors") or []:
@@ -161,8 +168,8 @@ def show_quarantine(data):
 
 
 def show_run(data):
-    if data.get("skipped"):
-        print("skipped: %s" % data["skipped"])
+    if not data:
+        print("run finished, but no summary was found")
         return
     print("run %s (%s)%s" % (data.get("run_id"), data.get("reason"),
                              " DRY RUN" if data.get("dry_run") else ""))
@@ -185,6 +192,26 @@ def show_run(data):
         print("  error        %s" % error)
     for warning in data.get("warnings") or []:
         print("  warning      %s" % warning)
+
+
+def wait_for_run(run_id, timeout=1800):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = request("GET", "/runs/" + urllib.parse.quote(run_id), timeout=30)
+        if data.get("found"):
+            return data.get("run")
+        time.sleep(2)
+    fail({"error": "run %s did not finish within %ss" % (run_id, timeout)})
+
+
+def wait_for_idle(timeout=1800):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = request("GET", "/status", timeout=30)
+        if not data.get("running"):
+            return data
+        time.sleep(2)
+    fail({"error": "a run is still in progress after %ss" % timeout})
 
 
 def main(argv=None):
@@ -232,6 +259,7 @@ def main(argv=None):
     run = sub.add_parser("run", help="trigger a purge now")
     run.add_argument("--live", action="store_true", help="actually delete (overrides DRY_RUN)")
     run.add_argument("--dry-run", action="store_true", help="force a dry run")
+    run.add_argument("--no-wait", action="store_true", help="return as soon as the run is accepted")
 
     audit = sub.add_parser("audit", help="recent audit log records")
     audit.add_argument("--limit", type=int, default=20)
@@ -305,6 +333,14 @@ def main(argv=None):
         if args.dry_run:
             body["dry_run"] = True
         data = request("POST", "/run", body)
+        if args.no_wait:
+            return print(json.dumps(data, indent=2))
+        if data.get("queued"):
+            status = wait_for_idle()
+            run_id = (status.get("state") or {}).get("last_run_id")
+            data = wait_for_run(run_id) if run_id else None
+        elif data.get("run_id"):
+            data = wait_for_run(data["run_id"])
         return print(json.dumps(data, indent=2)) if args.json else show_run(data)
     if args.command == "audit":
         data = request("GET", "/audit?limit=%d" % args.limit)

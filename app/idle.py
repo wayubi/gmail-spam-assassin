@@ -11,6 +11,7 @@ import select
 import socket
 import ssl
 import time
+import re
 
 HOST = "imap.gmail.com"
 PORT = 993
@@ -29,6 +30,9 @@ class IdleWatcher:
         self.sock = None
         self.buffer = bytearray()
         self.counter = 0
+        self.last_lines = []
+        self.uidnext = None
+        self.uidvalidity = None
 
     # -- connection -------------------------------------------------------
     def connect(self):
@@ -47,6 +51,14 @@ class IdleWatcher:
             raise IdleError("bad greeting: %r" % greeting)
         self._command(b"LOGIN", self._quote(self.user), self._quote(self.password), timeout=30)
         self._command(b"SELECT", self._quote(self.mailbox), timeout=30)
+        for line in self.last_lines:
+            text = line.decode("ascii", "replace")
+            match = re.search(r"\[UIDNEXT (\d+)\]", text)
+            if match:
+                self.uidnext = int(match.group(1))
+            match = re.search(r"\[UIDVALIDITY (\d+)\]", text)
+            if match:
+                self.uidvalidity = int(match.group(1))
 
     @staticmethod
     def _quote(value):
@@ -100,6 +112,7 @@ class IdleWatcher:
         parts = [tag, name]
         parts.extend(args)
         self._send(b" ".join(parts) + b"\r\n")
+        self.last_lines = []
         while True:
             line = self._read_line(timeout)
             if line.startswith(tag + b" "):
@@ -111,6 +124,7 @@ class IdleWatcher:
                         % (name.decode("ascii", "replace"), line.decode("utf-8", "replace"))
                     )
                 return line
+            self.last_lines.append(line)
 
     def noop(self, timeout=30):
         self._command(b"NOOP", timeout=timeout)

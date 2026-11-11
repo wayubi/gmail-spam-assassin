@@ -32,6 +32,12 @@ services:
       # Optional: leave deletion off until a dry run looks correct.
       # DRY_RUN: "false"
 
+      # Optional: per-run deletion caps. Quarantine (expiry plus old mail
+      # found while filing) uses MAX_DELETE_PER_RUN; the blacklist has its own
+      # cap so a quarantine backlog cannot starve it.
+      # MAX_DELETE_PER_RUN: "500"
+      # MAX_TRASH_PER_RUN: "200"
+
       # Optional: the quarantine hold. The label is created automatically on
       # the first run that has a quarantine entry; you can also create it in
       # Gmail and tick "Show in IMAP". Mail from senders on the quarantine list
