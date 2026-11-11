@@ -1,0 +1,41 @@
+# Copy this file to compose.override.yml and fill in the values.
+#
+#   cp compose.override.yml.example compose.override.yml
+#
+# Docker Compose merges compose.override.yml automatically on top of
+# compose.yml, and the file is gitignored so your real values stay local.
+#
+# Everything in compose.yml is generic on purpose. Put anything that identifies
+# you (addresses, hostnames, private network names, timezone) here instead.
+
+services:
+  gmail-spam-assassin:
+    # Optional. Only useful if you want the container to know its own FQDN.
+    # hostname: spam-assassin.example.com
+
+    environment:
+      # The Gmail account to clean up. IMAP must be enabled in Gmail settings.
+      GMAIL_USER: "you@example.com"
+
+      # Google Account > Security > 2-Step Verification > App passwords.
+      # 16 characters; spaces are fine, they are stripped. This credential can
+      # read and delete all mail in the account.
+      GMAIL_APP_PASSWORD: "paste_16_char_app_password"
+
+      # Required by every API route except the page itself.
+      # Generate one with: openssl rand -hex 24
+      SPAM_API_TOKEN: "change_me_long_random"
+
+      # Optional; UTC is fine. Affects log timestamps only.
+      # TZ: "America/Los_Angeles"
+
+      # Optional: leave deletion off until a dry run looks correct.
+      # DRY_RUN: "false"
+
+    # Optional: attach to a network that already exists (for a reverse proxy).
+    # networks:
+    #   - spam_assassin
+
+# networks:
+#   spam_assassin:
+#     external: true

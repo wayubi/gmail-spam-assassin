@@ -1,0 +1,48 @@
+services:
+  # Deletes mail from blacklisted senders over IMAP, and serves a small UI to
+  # pick senders and edit the blacklist. Deletion stops at [Gmail]/Trash, so a
+  # mistake is recoverable for 30 days. Nothing here touches Gmail's block list.
+  gmail-spam-assassin:
+    build:
+      context: .
+    image: gmail-spam-assassin:latest
+    container_name: gmail-spam-assassin
+    restart: unless-stopped
+    init: true
+    # The image never writes outside /data; a read-only rootfs proves it.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MODE: "${MODE:-idle}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-900}"
+      DRY_RUN: "${DRY_RUN:-true}"
+      MAX_DELETE_PER_RUN: "${MAX_DELETE_PER_RUN:-500}"
+      LIST_DAYS: "${LIST_DAYS:-30}"
+      ALLOW_FREEMAIL_DOMAINS: "${ALLOW_FREEMAIL_DOMAINS:-false}"
+      API_PORT: "8080"
+      TZ: "${TZ:-UTC}"
+      # GMAIL_USER, GMAIL_APP_PASSWORD and SPAM_API_TOKEN come from
+      # compose.override.yml (gitignored). The container refuses to start
+      # without them.
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Nothing personal belongs in this file. Host-specific values (hostname, an
+# external docker network, TZ, credentials) belong in compose.override.yml,
+# which Docker Compose merges automatically and which is gitignored.

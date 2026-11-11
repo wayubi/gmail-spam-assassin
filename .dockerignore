@@ -1,0 +1,11 @@
+# Never send secrets or mail data to the docker daemon.
+compose.override.yml
+compose.override.yml.example
+data/
+.git/
+.gitignore
+README.md
+deploy/
+
+__pycache__/
+*.pyc

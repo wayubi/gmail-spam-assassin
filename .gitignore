@@ -1,0 +1,5 @@
+compose.override.yml
+data/*
+!data/.gitkeep
+*.pyc
+__pycache__/
