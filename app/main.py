@@ -17,19 +17,24 @@ import sys
 import threading
 import time
 
-from . import api, blacklist, config, idle, runner, state
+from . import api, blacklist, config, idle, quarantine, runner, state, whitelist
 
 log = logging.getLogger("spam-assassin")
 
 
 def _log_summary(label, result):
     log.info(
-        "%s: ok=%s matched=%s trashed=%s would_trash=%s capped=%s errors=%s",
+        "%s: ok=%s matched=%s trashed=%s would_trash=%s filed=%s expired=%s "
+        "held=%s suppressed=%s capped=%s errors=%s",
         label,
         result.get("ok"),
         result.get("matched"),
         result.get("trashed"),
         result.get("would_trash"),
+        result.get("filed"),
+        result.get("expired"),
+        result.get("held"),
+        result.get("suppressed"),
         result.get("capped"),
         len(result.get("errors") or []),
     )
@@ -157,22 +162,46 @@ def main(argv=None):
         return 2
     try:
         blacklist.ensure(cfg.blacklist_path)
+        whitelist.ensure(cfg.whitelist_path)
+        quarantine.ensure(cfg.quarantine_path)
     except OSError as exc:
-        log.error("cannot create %s: %s", cfg.blacklist_path, exc)
+        log.error("cannot create list file: %s", exc)
         return 2
 
     entries, errors = blacklist.load(cfg.blacklist_path, cfg.allow_freemail_domains)
+    hidden, hidden_errors = whitelist.load(cfg.whitelist_path)
+    held, held_errors = quarantine.load(cfg.quarantine_path)
     log.info(
-        "mode=%s dry_run=%s entries=%d interval=%ss data=%s",
+        "mode=%s dry_run=%s entries=%d whitelisted=%d quarantine=%d "
+        "label=%r age=%s abort_over=%d interval=%ss data=%s",
         cfg.mode,
         cfg.dry_run,
         len(entries),
+        len(hidden),
+        len(held),
+        cfg.quarantine_label,
+        cfg.quarantine_age.text,
+        cfg.quarantine_abort_over,
         cfg.poll_interval,
         cfg.data_dir,
     )
     for error in errors:
         log.warning(
             "blacklist line %s ignored: %s (%s)",
+            error["line"],
+            error["entry"],
+            error["reason"],
+        )
+    for error in hidden_errors:
+        log.warning(
+            "whitelist line %s ignored: %s (%s)",
+            error["line"],
+            error["entry"],
+            error["reason"],
+        )
+    for error in held_errors:
+        log.warning(
+            "quarantine line %s ignored: %s (%s)",
             error["line"],
             error["entry"],
             error["reason"],

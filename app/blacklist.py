@@ -133,14 +133,14 @@ def matches(address, entries):
     return None
 
 
-def ensure(path):
+def ensure(path, header=HEADER):
     """Create the file with a header if it does not exist yet."""
     if os.path.exists(path):
         return
     with _lock:
         if os.path.exists(path):
             return
-        _write(path, HEADER)
+        _write(path, header)
 
 
 def _read_raw(path):
@@ -170,7 +170,7 @@ def _write(path, text):
                 pass
 
 
-def add(path, addresses, allow_freemail=False):
+def add(path, addresses, allow_freemail=False, header=HEADER):
     result = {"added": [], "skipped": [], "errors": []}
     with _lock:
         text = _read_raw(path)
@@ -191,7 +191,7 @@ def add(path, addresses, allow_freemail=False):
         if new_lines:
             body = text
             if not body.strip():
-                body = HEADER
+                body = header
             if body and not body.endswith("\n"):
                 body += "\n"
             body += "\n".join(new_lines) + "\n"

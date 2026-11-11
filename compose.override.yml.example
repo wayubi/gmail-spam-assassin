@@ -32,6 +32,17 @@ services:
       # Optional: leave deletion off until a dry run looks correct.
       # DRY_RUN: "false"
 
+      # Optional: the quarantine hold. Create this label in Gmail first and
+      # enable "Show in IMAP" for it under Settings > Labels. Mail from senders
+      # on the quarantine list is filed here and deleted once it is older than
+      # the age below. Age accepts days, months or years: 14d, 3m, 1y.
+      # QUARANTINE_LABEL: "Notifications"
+      # QUARANTINE_AGE: "14d"
+
+      # Optional: refuse to expire more than this many messages in one run.
+      # 0 (the default) means no extra brake; MAX_DELETE_PER_RUN still applies.
+      # QUARANTINE_ABORT_OVER: "1000"
+
     # Optional: attach to a network that already exists (for a reverse proxy).
     # networks:
     #   - spam_assassin

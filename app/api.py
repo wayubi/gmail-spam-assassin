@@ -9,9 +9,10 @@ import json
 import os
 import threading
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import blacklist, imap, listing, runner, state
+from . import blacklist, imap, listing, quarantine, runner, state, whitelist
 
 MAX_BODY = 64 * 1024
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -102,6 +103,7 @@ class Handler(BaseHTTPRequestHandler):
                     all_mail = imap.find_mailbox(conn, "/all mail", imap.ALL_MAIL)
                     spam = imap.find_mailbox(conn, "/spam")
                     trash = imap.find_mailbox(conn, "/trash")
+                    q_label = imap.find_label(conn, self.cfg.quarantine_label)
                 finally:
                     imap.logout(conn)
                 return self._json(
@@ -111,11 +113,13 @@ class Handler(BaseHTTPRequestHandler):
                         "all_mail": all_mail,
                         "spam": spam,
                         "trash": trash,
+                        "quarantine_label": q_label,
                         "can_delete": bool(trash),
                         "note": "Gmail hides Spam and Trash from IMAP unless "
                         "'Show in IMAP' is enabled for them in Settings > Labels. "
                         "Trash is required for deletion: without it a live run "
-                        "refuses to delete anything.",
+                        "refuses to delete anything. The quarantine label must "
+                        "also exist and be shown in IMAP.",
                     },
                     head_only,
                 )
@@ -132,6 +136,32 @@ class Handler(BaseHTTPRequestHandler):
                     blacklist.remove(self.cfg.blacklist_path, [address]),
                     head_only,
                 )
+            if method == "GET" and path == "/whitelist":
+                return self._whitelist(head_only)
+            if method == "POST" and path == "/whitelist":
+                return self._whitelist_add()
+            if method == "POST" and path == "/whitelist/remove":
+                return self._whitelist_remove()
+            if method == "DELETE" and path.startswith("/whitelist/"):
+                address = urllib.parse.unquote(path[len("/whitelist/") :])
+                if not address:
+                    return self._json(400, {"error": "no address in the path"}, head_only)
+                result = whitelist.remove(self.cfg.whitelist_path, [address])
+                listing.invalidate()
+                return self._json(200, result, head_only)
+            if method == "GET" and path == "/quarantine":
+                return self._quarantine(head_only)
+            if method == "POST" and path == "/quarantine":
+                return self._quarantine_add()
+            if method == "POST" and path == "/quarantine/remove":
+                return self._quarantine_remove()
+            if method == "DELETE" and path.startswith("/quarantine/"):
+                address = urllib.parse.unquote(path[len("/quarantine/") :])
+                if not address:
+                    return self._json(400, {"error": "no address in the path"}, head_only)
+                result = quarantine.remove(self.cfg.quarantine_path, [address])
+                listing.invalidate()
+                return self._json(200, result, head_only)
             if method == "POST" and path == "/run":
                 return self._run()
             if method == "GET" and path == "/audit":
@@ -151,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         entries, errors = blacklist.load(
             self.cfg.blacklist_path, self.cfg.allow_freemail_domains
         )
+        q_entries, q_errors = quarantine.load(self.cfg.quarantine_path)
         payload = {
             "ok": True,
             "mode": self.cfg.mode,
@@ -158,6 +189,14 @@ class Handler(BaseHTTPRequestHandler):
             "running": runner.busy(),
             "blacklist_entries": len(entries),
             "blacklist_errors": errors,
+            "whitelist_entries": len(whitelist.load(self.cfg.whitelist_path)[0]),
+            "quarantine_entries": len(q_entries),
+            "quarantine_errors": q_errors,
+            "quarantine_label": self.cfg.quarantine_label,
+            "quarantine_age": self.cfg.quarantine_age.text,
+            "quarantine_cutoff": self.cfg.quarantine_age.cutoff(
+                datetime.now(timezone.utc)
+            ).date().isoformat(),
             "mailboxes": ["[Gmail]/All Mail", "[Gmail]/Spam"],
             "trash_is_terminal": True,
             "max_delete_per_run": self.cfg.max_delete_per_run,
@@ -212,6 +251,83 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(addresses, list) or not addresses:
             return self._json(400, {"error": "expected {\"addresses\": [...]}"})
         result = blacklist.remove(self.cfg.blacklist_path, addresses)
+        listing.invalidate()
+        return self._json(200, result)
+
+    def _addresses(self):
+        """Shared body parsing for the list endpoints."""
+        body, error = self._body()
+        if error:
+            return None, self._json(400, {"error": error})
+        addresses = body.get("addresses")
+        if addresses is None and body.get("address"):
+            addresses = [body["address"]]
+        if not isinstance(addresses, list) or not addresses:
+            return None, self._json(400, {"error": "expected {\"addresses\": [...]}"})
+        return addresses, None
+
+    def _whitelist(self, head_only):
+        entries, errors = whitelist.load(self.cfg.whitelist_path)
+        return self._json(
+            200,
+            {
+                "path": self.cfg.whitelist_path,
+                "count": len(entries),
+                "entries": entries,
+                "errors": errors,
+            },
+            head_only,
+        )
+
+    def _whitelist_add(self):
+        addresses, error = self._addresses()
+        if error:
+            return error
+        result = whitelist.add(self.cfg.whitelist_path, addresses)
+        listing.invalidate()
+        result["count"] = len(whitelist.load(self.cfg.whitelist_path)[0])
+        return self._json(200, result)
+
+    def _whitelist_remove(self):
+        addresses, error = self._addresses()
+        if error:
+            return error
+        result = whitelist.remove(self.cfg.whitelist_path, addresses)
+        listing.invalidate()
+        return self._json(200, result)
+
+    def _quarantine(self, head_only):
+        entries, errors = quarantine.load(self.cfg.quarantine_path)
+        return self._json(
+            200,
+            {
+                "path": self.cfg.quarantine_path,
+                "count": len(entries),
+                "entries": entries,
+                "errors": errors,
+                "label": self.cfg.quarantine_label,
+                "age": self.cfg.quarantine_age.text,
+                "cutoff": self.cfg.quarantine_age.cutoff(
+                    datetime.now(timezone.utc)
+                ).date().isoformat(),
+            },
+            head_only,
+        )
+
+    def _quarantine_add(self):
+        addresses, error = self._addresses()
+        if error:
+            return error
+        result = quarantine.add(self.cfg.quarantine_path, addresses)
+        listing.invalidate()
+        result["count"] = len(quarantine.load(self.cfg.quarantine_path)[0])
+        return self._json(200, result)
+
+    def _quarantine_remove(self):
+        addresses, error = self._addresses()
+        if error:
+            return error
+        result = quarantine.remove(self.cfg.quarantine_path, addresses)
         listing.invalidate()
         return self._json(200, result)
 

@@ -169,12 +169,45 @@ def find_mailbox(conn, suffix, default=None):
     return None
 
 
+def find_label(conn, name):
+    """Resolve a user-created Gmail label as an IMAP folder, or None.
+
+    Exact match first, then case-insensitive. System folders are never
+    returned: pointing QUARANTINE_LABEL at Trash, Spam or All Mail would turn a
+    reversible hold into something very different.
+    """
+    wanted = (name or "").strip()
+    if not wanted:
+        return None
+    names = list_mailboxes(conn)
+    for candidate in names:
+        if candidate == wanted:
+            return candidate
+    for candidate in names:
+        if candidate.lower() == wanted.lower():
+            return candidate
+    return None
+
+
 def search_uids(conn, raw_query, mailbox):
     """Gmail-indexed search. Opens the mailbox read-only."""
     select(conn, mailbox, readonly=True)
     typ, data = conn.uid("SEARCH", "X-GM-RAW", quote(raw_query))
     if typ != "OK":
         raise ImapError("search failed in %s: %s" % (mailbox, data))
+    uids = []
+    for chunk in data:
+        if chunk:
+            uids.extend(chunk.split())
+    return sorted(int(uid) for uid in uids)
+
+
+def all_uids(conn, mailbox):
+    """Every UID in a mailbox, without Gmail's search syntax. Read-only."""
+    select(conn, mailbox, readonly=True)
+    typ, data = conn.uid("SEARCH", "ALL")
+    if typ != "OK":
+        raise ImapError("search ALL failed in %s: %s" % (mailbox, data))
     uids = []
     for chunk in data:
         if chunk:
@@ -298,6 +331,38 @@ def _decode(value):
 
 def select_writable(conn, mailbox):
     select(conn, mailbox, readonly=False)
+
+
+def _store_labels(conn, uids, item, labels, chunk_size=50):
+    """Issue +X-GM-LABELS / -X-GM-LABELS for a set of UIDs.
+
+    This is label editing, not deletion: it cannot move anything to Trash or
+    out of All Mail by accident, which is why quarantining uses it instead of
+    COPY plus a delete.
+    """
+    total = 0
+    uids = list(uids)
+    if not uids or not labels:
+        return 0
+    values = "(" + " ".join(quote(label) for label in labels) + ")"
+    for start in range(0, len(uids), chunk_size):
+        chunk = uids[start : start + chunk_size]
+        uidset = ",".join(str(uid) for uid in chunk)
+        typ, data = conn.uid("STORE", uidset, item, values)
+        if typ != "OK":
+            raise ImapError(
+                "%s failed for %s: %s" % (item, uidset, data)
+            )
+        total += len(chunk)
+    return total
+
+
+def add_labels(conn, uids, labels, chunk_size=50):
+    return _store_labels(conn, uids, "+X-GM-LABELS", labels, chunk_size)
+
+
+def remove_labels(conn, uids, labels, chunk_size=50):
+    return _store_labels(conn, uids, "-X-GM-LABELS", labels, chunk_size)
 
 
 def move_to_trash(conn, uids, trash, chunk_size=50):

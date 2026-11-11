@@ -7,8 +7,9 @@ account. Treat a deployment as sensitive.
 
 - Your `GMAIL_APP_PASSWORD` (16 characters, spaces removed)
 - Your `SPAM_API_TOKEN`
-- Lines from `data/audit.jsonl`, `data/state.json` or `data/blacklist.txt` —
-  they contain sender addresses, subjects and UIDs
+- Lines from `data/audit.jsonl`, `data/state.json`, `data/blacklist.txt`,
+  `data/whitelist.txt` or `data/quarantine.txt` — they contain sender addresses,
+  subjects and UIDs
 - Screenshots of the web UI with real mail visible
 - The contents of `compose.override.yml`
 
@@ -28,5 +29,11 @@ could cause mail loss or credential exposure.
 - The app never issues `EXPUNGE` or sets `\Deleted`. Deletion is a `COPY` into
   `[Gmail]/Trash`, so mail is recoverable for 30 days.
 - A live run refuses to start if `[Gmail]/Trash` is not visible over IMAP.
+- A whitelist entry always wins over both delete lists, so a sender you have
+  protected is never deleted even if the others match it.
+- Quarantine files mail by editing labels (`X-GM-LABELS`), which cannot delete.
+  Its only deletion path is the same `COPY` into `[Gmail]/Trash`.
+- Quarantine expiry only touches senders still on the quarantine list, so
+  removing an entry cancels its queued deletions.
 - Message bodies are never fetched, logged or stored; only `From`, `Subject`,
   `Date`, UID and Gmail message ID are used.

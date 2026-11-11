@@ -7,7 +7,7 @@ Results are cached for 60 s so clicking around does not hammer IMAP.
 import threading
 import time
 
-from . import blacklist, imap
+from . import blacklist, imap, quarantine, whitelist
 
 TTL = 60.0
 
@@ -48,6 +48,8 @@ def _messages(cfg, days, limit, folder):
     conn = imap.connect(cfg.gmail_user, cfg.gmail_password)
     try:
         entries, _ = blacklist.load(cfg.blacklist_path, cfg.allow_freemail_domains)
+        hidden, _ = whitelist.load(cfg.whitelist_path)
+        held_senders, _ = quarantine.load(cfg.quarantine_path)
         warnings = []
         all_mail = imap.find_mailbox(conn, "/all mail", imap.ALL_MAIL)
         if not all_mail:
@@ -74,6 +76,7 @@ def _messages(cfg, days, limit, folder):
         rows = []
         seen = set()
         scanned = 0
+        hidden_count = 0
         for mailbox, kind, query in targets:
             uids = imap.search_uids(conn, query, mailbox)
             scanned += len(uids)
@@ -82,13 +85,17 @@ def _messages(cfg, days, limit, folder):
                 if key in seen:
                     continue
                 seen.add(key)
-                rows.append(_row(meta, kind, entries))
+                if whitelist.matches(meta["from_addr"], hidden):
+                    hidden_count += 1
+                    continue
+                rows.append(_row(meta, kind, entries, held_senders))
         rows.sort(key=lambda row: row["date"] or "", reverse=True)
         return {
             "days": days,
             "folder": folder,
             "scanned": scanned,
             "count": len(rows[:limit]),
+            "hidden": hidden_count,
             "warnings": warnings,
             "messages": rows[:limit],
         }
@@ -96,7 +103,7 @@ def _messages(cfg, days, limit, folder):
         imap.logout(conn)
 
 
-def _row(meta, kind, entries):
+def _row(meta, kind, entries, held_senders):
     return {
         "uid": meta["uid"],
         "msgid": meta["msgid"],
@@ -107,6 +114,7 @@ def _row(meta, kind, entries):
         "labels": meta["labels"],
         "folder": "Spam" if kind == "spam" else "All Mail",
         "blacklisted": blacklist.matches(meta["from_addr"], entries),
+        "quarantined": quarantine.matches(meta["from_addr"], held_senders),
     }
 
 
@@ -131,6 +139,7 @@ def _senders(cfg, days, limit):
                 "latest_date": row["date"],
                 "labels": set(),
                 "blacklisted": row["blacklisted"],
+                "quarantined": row["quarantined"],
             }
         group["count"] += 1
         group["labels"].update(row["labels"])
@@ -141,6 +150,8 @@ def _senders(cfg, days, limit):
                 group["name"] = row["from_name"]
         if row["blacklisted"]:
             group["blacklisted"] = row["blacklisted"]
+        if row["quarantined"]:
+            group["quarantined"] = row["quarantined"]
 
     items = []
     for group in groups.values():
@@ -151,6 +162,7 @@ def _senders(cfg, days, limit):
     return {
         "days": days,
         "count": len(items),
+        "hidden": data.get("hidden", 0),
         "warnings": data.get("warnings", []),
         "senders": items,
     }

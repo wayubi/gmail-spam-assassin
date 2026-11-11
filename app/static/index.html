@@ -49,7 +49,7 @@
   button.primary { border-color: #2f5d80; color: #cfe8fb; }
   button.danger { border-color: #5a2f2f; color: #f0b7b2; }
   nav {
-    display: flex; gap: 6px; padding: 10px 18px 0; background: var(--bg);
+    display: flex; gap: 6px; padding: 10px 18px 0; background: var(--bg); flex-wrap: wrap;
   }
   nav button { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; color: var(--dim); }
   nav button.active { background: var(--panel); color: var(--text); border-color: var(--line); border-bottom-color: var(--panel); }
@@ -70,6 +70,7 @@
   .dim { color: var(--dim); }
   .tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--dim); margin-left: 6px; white-space: nowrap; }
   .tag.bl { color: var(--bad); border-color: #5a2f2f; }
+  .tag.q { color: var(--accent); border-color: #2f5d80; }
   .tag.spam { color: var(--warn); border-color: #4a3f2a; }
   .empty { color: var(--dim); padding: 18px 4px; }
   #toast {
@@ -110,6 +111,8 @@
   <button data-tab="mail" class="active">Recent mail</button>
   <button data-tab="senders">Senders</button>
   <button data-tab="blacklist">Blacklist</button>
+  <button data-tab="whitelist">Whitelist</button>
+  <button data-tab="quarantine">Quarantine</button>
 </nav>
 
 <main>
@@ -124,7 +127,9 @@
           <option value="spam">spam</option>
         </select>
       </label>
-      <button id="btn-add-mail" disabled>Add selected senders</button>
+      <button id="btn-add-mail" disabled>Add to blacklist</button>
+      <button id="btn-hide-mail" disabled>Add to whitelist</button>
+      <button id="btn-q-mail" disabled>Add to quarantine</button>
       <span class="info" id="mail-info"></span>
     </div>
     <table>
@@ -143,7 +148,9 @@
   <section id="tab-senders" hidden>
     <div class="toolbar">
       <label>days <input id="sdays" type="number" value="30" min="1" max="365"></label>
-      <button id="btn-add-senders" disabled>Add selected senders</button>
+      <button id="btn-add-senders" disabled>Add to blacklist</button>
+      <button id="btn-hide-senders" disabled>Add to whitelist</button>
+      <button id="btn-q-senders" disabled>Add to quarantine</button>
       <span class="info" id="senders-info"></span>
     </div>
     <table>
@@ -164,11 +171,44 @@
     <div class="toolbar">
       <div class="row" style="flex:1">
         <input id="bl-input" type="text" placeholder="add an address (a@b.com) or a domain (@b.com)">
-        <button id="btn-add-manual" class="primary">Add</button>
+        <button id="btn-add-manual" class="primary">Add to blacklist</button>
       </div>
       <span class="info" id="bl-info"></span>
     </div>
     <ul class="bl" id="bl-list"></ul>
+  </section>
+
+  <section id="tab-whitelist" hidden>
+    <div class="toolbar">
+      <div class="row" style="flex:1">
+        <input id="wl-input" type="text" placeholder="never delete or list: a@b.com or @b.com">
+        <button id="btn-add-manual-wl" class="primary">Add to whitelist</button>
+      </div>
+      <span class="info" id="wl-info"></span>
+    </div>
+    <p class="dim" style="margin:0 0 10px">
+      These senders are never moved to Trash, even if they also match the blacklist,
+      and they are hidden from Recent mail and Senders.
+    </p>
+    <ul class="bl" id="wl-list"></ul>
+  </section>
+
+  <section id="tab-quarantine" hidden>
+    <div class="toolbar">
+      <div class="row" style="flex:1">
+        <input id="q-input" type="text" placeholder="hold then delete: a@b.com or @b.com">
+        <button id="btn-add-manual-q" class="primary">Add to quarantine</button>
+      </div>
+      <span class="info" id="q-info"></span>
+    </div>
+    <p class="dim" style="margin:0 0 10px">
+      New mail is labelled and taken out of Inbox. Mail older than the configured
+      age goes straight to Trash; held mail expires as it crosses that age.
+      A whitelist entry always wins. The label and age come from
+      <span class="mono">QUARANTINE_LABEL</span> and
+      <span class="mono">QUARANTINE_AGE</span>.
+    </p>
+    <ul class="bl" id="q-list"></ul>
   </section>
 </main>
 
@@ -292,6 +332,9 @@ async function loadStatus() {
   runPill.title = "matched=" + (st.last_matched ?? "–")
     + " trashed=" + (st.last_trashed ?? "–")
     + " would_trash=" + (st.last_would_trash ?? "–")
+    + " filed=" + (st.last_filed ?? "–")
+    + " expired=" + (st.last_expired ?? "–")
+    + " held=" + (st.last_held ?? "–")
     + (st.last_error ? "\n" + st.last_error : "");
   $("btn-run").textContent = data.running ? "running…" : "Run now";
   $("btn-run").disabled = !!data.running;
@@ -304,12 +347,14 @@ function showTab(name) {
   for (const button of document.querySelectorAll("nav button")) {
     button.classList.toggle("active", button.dataset.tab === name);
   }
-  for (const tab of ["mail", "senders", "blacklist"]) {
+  for (const tab of ["mail", "senders", "blacklist", "whitelist", "quarantine"]) {
     $("tab-" + tab).hidden = tab !== name;
   }
   if (name === "mail") loadMail();
   if (name === "senders") loadSenders();
   if (name === "blacklist") loadBlacklist();
+  if (name === "whitelist") loadWhitelist();
+  if (name === "quarantine") loadQuarantine();
 }
 for (const button of document.querySelectorAll("nav button")) {
   button.addEventListener("click", () => showTab(button.dataset.tab));
@@ -318,9 +363,12 @@ for (const button of document.querySelectorAll("nav button")) {
 /* ---------- mail ---------- */
 function updateMailButton() {
   $("btn-add-mail").disabled = state.selectedMail.size === 0 || state.busy;
-  $("btn-add-mail").textContent = state.selectedMail.size
-    ? "Add " + state.selectedMail.size + " sender(s)"
-    : "Add selected senders";
+  $("btn-hide-mail").disabled = $("btn-add-mail").disabled;
+  $("btn-q-mail").disabled = $("btn-add-mail").disabled;
+  const n = state.selectedMail.size;
+  $("btn-add-mail").textContent = n ? "Add " + n + " to blacklist" : "Add to blacklist";
+  $("btn-hide-mail").textContent = n ? "Add " + n + " to whitelist" : "Add to whitelist";
+  $("btn-q-mail").textContent = n ? "Add " + n + " to quarantine" : "Add to quarantine";
 }
 
 async function loadMail() {
@@ -350,6 +398,7 @@ async function loadMail() {
         el("div", { class: "mono", text: row.from_addr || "(unknown)" }),
         row.from_name ? el("div", { class: "dim", text: row.from_name }) : null,
         row.blacklisted ? el("span", { class: "tag bl", text: "blacklisted" }) : null,
+        row.quarantined ? el("span", { class: "tag q", text: "quarantine" }) : null,
         row.folder === "Spam" ? el("span", { class: "tag spam", text: "spam" }) : null,
       ]);
       body.append(el("tr", null, [
@@ -362,7 +411,8 @@ async function loadMail() {
         ]),
       ]));
     }
-    $("mail-info").textContent = data.count + " shown · " + data.scanned + " matched the search";
+    $("mail-info").textContent = data.count + " shown · " + data.scanned + " matched the search"
+      + (data.hidden ? " · " + data.hidden + " hidden by whitelist" : "");
     updateMailButton();
   } catch (err) {
     body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "4", text: err.message })]));
@@ -372,9 +422,12 @@ async function loadMail() {
 /* ---------- senders ---------- */
 function updateSendersButton() {
   $("btn-add-senders").disabled = state.selectedSenders.size === 0 || state.busy;
-  $("btn-add-senders").textContent = state.selectedSenders.size
-    ? "Add " + state.selectedSenders.size + " sender(s)"
-    : "Add selected senders";
+  $("btn-hide-senders").disabled = $("btn-add-senders").disabled;
+  $("btn-q-senders").disabled = $("btn-add-senders").disabled;
+  const n = state.selectedSenders.size;
+  $("btn-add-senders").textContent = n ? "Add " + n + " to blacklist" : "Add to blacklist";
+  $("btn-hide-senders").textContent = n ? "Add " + n + " to whitelist" : "Add to whitelist";
+  $("btn-q-senders").textContent = n ? "Add " + n + " to quarantine" : "Add to quarantine";
 }
 
 async function loadSenders() {
@@ -402,41 +455,63 @@ async function loadSenders() {
           el("div", { class: "mono", text: row.address }),
           row.name ? el("div", { class: "dim", text: row.name }) : null,
           row.blacklisted ? el("span", { class: "tag bl", text: "blacklisted" }) : null,
+          row.quarantined ? el("span", { class: "tag q", text: "quarantine" }) : null,
         ]),
         el("td", { class: "mono dim", text: fmtDate(row.latest_date) }),
         el("td", { text: row.latest_subject || "" }),
       ]));
     }
-    $("senders-info").textContent = data.count + " sender(s), last " + data.days + " day(s)";
+    $("senders-info").textContent = data.count + " sender(s), last " + data.days + " day(s)"
+      + (data.hidden ? " · " + data.hidden + " hidden by whitelist" : "");
     updateSendersButton();
   } catch (err) {
     body.replaceChildren(el("tr", null, [el("td", { class: "empty", colspan: "5", text: err.message })]));
   }
 }
 
-/* ---------- blacklist ---------- */
-async function loadBlacklist() {
-  const list = $("bl-list");
+/* ---------- blacklist / whitelist / quarantine ---------- */
+const LISTS = {
+  blacklist: { prefix: "bl", empty: "empty — add an address above, or from the mail/senders tabs" },
+  whitelist: { prefix: "wl", empty: "empty — nothing is hidden" },
+  quarantine: { prefix: "q", empty: "empty — nothing is held" },
+};
+
+async function loadList(kind) {
+  const meta = LISTS[kind];
+  const list = $(meta.prefix + "-list");
   list.replaceChildren(el("li", { class: "empty", text: "loading…" }));
   try {
-    const data = await api("GET", "/blacklist");
+    const data = await api("GET", "/" + kind);
     list.replaceChildren();
     if (!data.entries.length) {
-      list.append(el("li", { class: "empty", text: "empty — add an address above, or from the mail/senders tabs" }));
+      list.append(el("li", { class: "empty", text: meta.empty }));
     }
     for (const entry of data.entries) {
       const remove = el("button", { class: "danger", text: "remove" });
       remove.addEventListener("click", async () => {
-        if (!confirm("Remove " + entry + " from the blacklist?\n\nMail already in Trash stays there.")) return;
+        const notes = {
+          whitelist: "Mail from it becomes visible again.",
+          quarantine: "Mail already in the label stops being deleted when it ages out.",
+          blacklist: "Mail already in Trash stays there.",
+        };
+        const note = notes[kind] || "";
+        if (!confirm("Remove " + entry + " from the " + kind + "?\n\n" + note)) return;
         try {
-          await api("POST", "/blacklist/remove", { addresses: [entry] });
+          await api("POST", "/" + kind + "/remove", { addresses: [entry] });
           toast("removed " + entry);
-          loadBlacklist();
+          loadList(kind);
         } catch (err) { toast(err.message, true); }
       });
       list.append(el("li", null, [el("span", { class: "mono", text: entry }), remove]));
     }
-    $("bl-info").textContent = data.count + " entr" + (data.count === 1 ? "y" : "ies") + " · " + data.path;
+    let info = data.count + " entr" + (data.count === 1 ? "y" : "ies") + " · " + data.path;
+    if (kind === "quarantine" && data.label) {
+      info += " · " + data.label + " · " + data.age + " · older than " + data.cutoff;
+      const last = state.status && state.status.state ? state.status.state : {};
+      if (last.last_held != null) info += " · " + last.last_held + " held";
+      if (last.last_stale) info += " · " + last.last_stale + " stale";
+    }
+    $(meta.prefix + "-info").textContent = info;
     for (const error of data.errors || []) {
       toast("line " + error.line + " ignored: " + error.entry + " (" + error.reason + ")", true);
     }
@@ -445,15 +520,21 @@ async function loadBlacklist() {
   }
 }
 
+function loadBlacklist() { return loadList("blacklist"); }
+function loadWhitelist() { return loadList("whitelist"); }
+function loadQuarantine() { return loadList("quarantine"); }
+
 /* ---------- actions ---------- */
-async function addAddresses(addresses, after) {
+async function addAddresses(addresses, after, endpoint) {
   if (!addresses.length) return;
+  endpoint = endpoint || "/blacklist";
+  const listName = { "/blacklist": "blacklist", "/whitelist": "whitelist", "/quarantine": "quarantine" }[endpoint] || "blacklist";
   state.busy = true;
   try {
-    const result = await api("POST", "/blacklist", { addresses });
+    const result = await api("POST", endpoint, { addresses });
     const parts = [];
-    if (result.added.length) parts.push("added " + result.added.length);
-    if (result.skipped.length) parts.push("already there " + result.skipped.length);
+    if (result.added.length) parts.push("added " + result.added.length + " to " + listName);
+    if (result.skipped.length) parts.push("already on the " + listName);
     if (result.errors.length) parts.push("rejected " + result.errors.length);
     toast(parts.join(", ") + (result.added.length ? ":\n" + result.added.join("\n") : ""));
     if (result.errors.length) {
@@ -472,8 +553,20 @@ async function addAddresses(addresses, after) {
 $("btn-add-mail").addEventListener("click", () => {
   addAddresses([...state.selectedMail], loadMail);
 });
+$("btn-hide-mail").addEventListener("click", () => {
+  addAddresses([...state.selectedMail], loadMail, "/whitelist");
+});
+$("btn-q-mail").addEventListener("click", () => {
+  addAddresses([...state.selectedMail], loadMail, "/quarantine");
+});
 $("btn-add-senders").addEventListener("click", () => {
   addAddresses([...state.selectedSenders], loadSenders);
+});
+$("btn-hide-senders").addEventListener("click", () => {
+  addAddresses([...state.selectedSenders], loadSenders, "/whitelist");
+});
+$("btn-q-senders").addEventListener("click", () => {
+  addAddresses([...state.selectedSenders], loadSenders, "/quarantine");
 });
 $("btn-add-manual").addEventListener("click", () => {
   const value = $("bl-input").value.trim();
@@ -483,6 +576,24 @@ $("btn-add-manual").addEventListener("click", () => {
 });
 $("bl-input").addEventListener("keydown", (event) => {
   if (event.key === "Enter") $("btn-add-manual").click();
+});
+$("btn-add-manual-wl").addEventListener("click", () => {
+  const value = $("wl-input").value.trim();
+  if (!value) return;
+  const entries = value.split(/[\s,;]+/).filter(Boolean);
+  addAddresses(entries, () => { $("wl-input").value = ""; loadWhitelist(); }, "/whitelist");
+});
+$("wl-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("btn-add-manual-wl").click();
+});
+$("btn-add-manual-q").addEventListener("click", () => {
+  const value = $("q-input").value.trim();
+  if (!value) return;
+  const entries = value.split(/[\s,;]+/).filter(Boolean);
+  addAddresses(entries, () => { $("q-input").value = ""; loadQuarantine(); }, "/quarantine");
+});
+$("q-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("btn-add-manual-q").click();
 });
 
 $("btn-run").addEventListener("click", async () => {
@@ -498,9 +609,15 @@ $("btn-run").addEventListener("click", async () => {
         (data.dry_run ? "DRY RUN" : "run") + " " + data.run_id + "\n"
         + "matched " + data.matched + " · trashed " + data.trashed
         + " · would trash " + data.would_trash
+        + (data.filed ? " · filed " + data.filed : "")
+        + (data.would_file ? " · would file " + data.would_file : "")
+        + (data.expired ? " · expired " + data.expired : "")
+        + (data.would_expire ? " · would expire " + data.would_expire : "")
+        + (data.suppressed ? " · suppressed " + data.suppressed : "")
         + (data.capped ? " · capped" : "")
-        + (data.errors && data.errors.length ? "\n" + data.errors.join("\n") : ""),
-        !!(data.errors && data.errors.length)
+        + (data.errors && data.errors.length ? "\n" + data.errors.join("\n") : "")
+        + (data.warnings && data.warnings.length ? "\n" + data.warnings.join("\n") : ""),
+        !!((data.errors && data.errors.length) || (data.warnings && data.warnings.length))
       );
     }
     await loadStatus();
@@ -540,6 +657,8 @@ function refresh() {
   if (state.tab === "mail") loadMail();
   if (state.tab === "senders") loadSenders();
   if (state.tab === "blacklist") loadBlacklist();
+  if (state.tab === "whitelist") loadWhitelist();
+  if (state.tab === "quarantine") loadQuarantine();
 }
 
 if (!token()) openTokenDialog();
